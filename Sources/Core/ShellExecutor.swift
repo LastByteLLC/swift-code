@@ -26,7 +26,7 @@ public struct ShellResult: Sendable {
 
 public struct ShellExecutor: Sendable {
   private static let dangerousPatterns = [
-    "rm -rf /", "sudo", "shutdown", "reboot", "> /dev/",
+    "rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"
   ]
 
   public let workingDirectory: String

@@ -104,12 +104,12 @@ struct AgentLoopTests {
       makeResponse(
         content: [
           .text("Let me check."),
-          .toolUse(id: "t1", name: "bash", input: .object(["command": "echo hi"])),
+          .toolUse(id: "t1", name: "bash", input: .object(["command": "echo hi"]))
         ],
         stopReason: .toolUse
       ),
       // Second response: final answer after seeing tool result
-      makeResponse(content: [.text("done")]),
+      makeResponse(content: [.text("done")])
     ]
     let (agent, _) = makeAgent(mock: mock)
 

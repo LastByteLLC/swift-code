@@ -16,10 +16,10 @@ struct ContentBlockTests {
   @Test func decodesToolUse() throws {
     let json = """
       {
-          "type": "tool_use",
-          "id": "toolu_123",
-          "name": "bash",
-          "input": {"command": "ls"}
+        "type": "tool_use",
+        "id": "toolu_123",
+        "name": "bash",
+        "input": {"command": "ls"}
       }
       """
     let block = try JSONDecoder().decode(ContentBlock.self, from: Data(json.utf8))
@@ -36,10 +36,10 @@ struct ContentBlockTests {
   @Test func decodesToolResult() throws {
     let json = """
       {
-          "type": "tool_result",
-          "tool_use_id": "toolu_789",
-          "content": "output text",
-          "is_error": true
+        "type": "tool_result",
+        "tool_use_id": "toolu_789",
+        "content": "output text",
+        "is_error": true
       }
       """
     let block = try JSONDecoder().decode(ContentBlock.self, from: Data(json.utf8))
@@ -64,7 +64,7 @@ struct ContentBlockTests {
     let blocks: [ContentBlock] = [
       .text("Hello"),
       .toolUse(id: "t1", name: "bash", input: .object(["command": "ls"])),
-      .text("World"),
+      .text("World")
     ]
     #expect(blocks.textContent == "Hello\nWorld")
   }
@@ -72,7 +72,7 @@ struct ContentBlockTests {
   @Test func textContentEmptyWhenNoTextBlocks() {
     let blocks: [ContentBlock] = [
       .toolUse(id: "t1", name: "bash", input: .object(["command": "ls"])),
-      .toolResult(toolUseId: "t1", content: "output", isError: false),
+      .toolResult(toolUseId: "t1", content: "output", isError: false)
     ]
     #expect(blocks.textContent == "")
   }
@@ -93,7 +93,7 @@ struct MessageTests {
       role: .assistant,
       content: [
         .text("Let me run that."),
-        .toolUse(id: "toolu_abc", name: "bash", input: .object(["command": "pwd"])),
+        .toolUse(id: "toolu_abc", name: "bash", input: .object(["command": "pwd"]))
       ]
     )
 
@@ -113,7 +113,7 @@ struct StopReasonTests {
     arguments: [
       (#""end_turn""#, StopReason.endTurn),
       (#""tool_use""#, StopReason.toolUse),
-      (#""max_tokens""#, StopReason.maxTokens),
+      (#""max_tokens""#, StopReason.maxTokens)
     ]
   )
   func decodes(json: String, expected: StopReason) throws {
@@ -141,7 +141,7 @@ struct APIRequestTests {
             "properties": .object([
               "command": .object(["type": "string"])
             ]),
-            "required": .array(["command"]),
+            "required": .array(["command"])
           ])
         )
       ]
@@ -162,17 +162,17 @@ struct APIResponseTests {
   @Test func decodes() throws {
     let json = """
       {
-          "id": "msg_abc123",
-          "type": "message",
-          "role": "assistant",
-          "content": [
-              {"type": "text", "text": "Here are the files."}
-          ],
-          "stop_reason": "end_turn",
-          "usage": {
-              "input_tokens": 100,
-              "output_tokens": 50
-          }
+        "id": "msg_abc123",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {"type": "text", "text": "Here are the files."}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 100,
+          "output_tokens": 50
+        }
       }
       """
     let response = try JSONDecoder().decode(APIResponse.self, from: Data(json.utf8))
@@ -190,11 +190,11 @@ struct APIErrorTests {
   @Test func decodesErrorResponse() throws {
     let json = """
       {
-          "type": "error",
-          "error": {
-              "type": "invalid_request_error",
-              "message": "max_tokens must be positive"
-          }
+        "type": "error",
+        "error": {
+          "type": "invalid_request_error",
+          "message": "max_tokens must be positive"
+        }
       }
       """
     let response = try JSONDecoder().decode(APIErrorResponse.self, from: Data(json.utf8))

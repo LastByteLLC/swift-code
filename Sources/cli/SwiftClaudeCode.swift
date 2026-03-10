@@ -2,7 +2,7 @@ import Core
 import Foundation
 
 @main
-struct SwiftClaudeCode {
+enum SwiftClaudeCode {
   static func main() async throws {
     print("\(ANSIColor.bold)swift-claude-code\(ANSIColor.reset) v\(Agent.version)")
     print("\(ANSIColor.dim)A Claude Code-like agent built from scratch in Swift\(ANSIColor.reset)")

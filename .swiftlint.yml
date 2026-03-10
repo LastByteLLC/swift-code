@@ -1,0 +1,39 @@
+opt_in_rules:
+  # Performance
+  - first_where
+  - last_where
+  - sorted_first_last
+  - contains_over_filter_count
+  - empty_count
+
+  # Modern Swift style
+  - shorthand_optional_binding
+  - implicit_return
+  - toggle_bool
+
+  # Safety
+  - fatal_error_message
+
+  # Code cleanliness
+  - modifier_order
+  - redundant_type_annotation
+  - convenience_type
+
+  # Formatting
+  - indentation_width
+
+excluded:
+  - .build
+  - .swiftpm
+
+indentation_width:
+  indentation_width: 2
+
+identifier_name:
+  min_length:
+    warning: 2
+  excluded:
+    - i
+    - id
+    - x
+    - y

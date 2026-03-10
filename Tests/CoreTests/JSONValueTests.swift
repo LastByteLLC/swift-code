@@ -25,7 +25,7 @@ struct JSONValueTests {
       "verbose": .bool(true),
       "count": .int(3),
       "ratio": .double(1.5),
-      "nothing": .null,
+      "nothing": .null
     ])
     let data = try JSONEncoder().encode(original)
     let decoded = try JSONDecoder().decode(JSONValue.self, from: data)

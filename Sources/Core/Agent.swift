@@ -103,10 +103,10 @@ extension Agent {
       "properties": .object([
         "command": .object([
           "type": "string",
-          "description": "The shell command to execute",
+          "description": "The shell command to execute"
         ])
       ]),
-      "required": .array(["command"]),
+      "required": .array(["command"])
     ])
   )
 

@@ -8,7 +8,7 @@ let package = Package(
   platforms: [.macOS(.v10_15)],
   products: [
     .executable(name: "claude", targets: ["cli"]),
-    .library(name: "Core", targets: ["Core"]),
+    .library(name: "Core", targets: ["Core"])
   ],
   dependencies: [
     .package(url: "https://github.com/swift-server/async-http-client.git", from: "1.32.0")
@@ -30,6 +30,6 @@ let package = Package(
       name: "CoreTests",
       dependencies: ["Core"],
       path: "Tests/CoreTests"
-    ),
+    )
   ]
 )

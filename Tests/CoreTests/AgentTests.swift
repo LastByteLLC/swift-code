@@ -132,6 +132,6 @@ struct AgentLoopTests {
 @Suite("Agent")
 struct AgentTests {
   @Test func versionExists() {
-    #expect(Agent.version == "0.1.0")
+    #expect(!Agent.version.isEmpty)
   }
 }

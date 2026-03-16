@@ -35,12 +35,14 @@ final class MockAPIClient: APIClientProtocol, @unchecked Sendable {
 }
 
 func makeAgent(
-  mock: MockAPIClient = MockAPIClient()
+  mock: MockAPIClient = MockAPIClient(),
+  skillsDirectory: String? = nil
 ) -> (Agent, MockAPIClient) {
   let agent = Agent(
     apiClient: mock,
     model: "test-model",
-    systemPrompt: "You are a test agent."
+    systemPrompt: "You are a test agent.",
+    skillsDirectory: skillsDirectory
   )
   return (agent, mock)
 }
@@ -57,6 +59,16 @@ func makeResponse(
     stopReason: stopReason,
     usage: Usage(inputTokens: 10, outputTokens: 5)
   )
+}
+
+func isToolResult(
+  _ block: ContentBlock,
+  where predicate: (String, String, Bool) -> Bool
+) -> Bool {
+  if case .toolResult(let id, let content, let isError) = block {
+    return predicate(id, content, isError)
+  }
+  return false
 }
 
 func toolUseResponses(count: Int) -> [APIResponse] {

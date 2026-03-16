@@ -8,7 +8,7 @@ public enum Limits {
 }
 
 public final class Agent {
-  public static let version = "0.4.0"
+  public static let version = "0.5.0"
 
   private static let todoReminderThreshold = 3
 
@@ -18,6 +18,7 @@ public final class Agent {
   private let workingDirectory: String
 
   private let shellExecutor: ShellExecutor
+  private let skillLoader: SkillLoader
   private let todoManager = TodoManager()
 
   private var messages: [Message] = []
@@ -26,13 +27,20 @@ public final class Agent {
     apiClient: APIClientProtocol,
     model: String,
     systemPrompt: String? = nil,
-    workingDirectory: String = "."
+    workingDirectory: String = ".",
+    skillsDirectory: String? = nil
   ) {
     self.apiClient = apiClient
     self.model = model
-    self.systemPrompt = systemPrompt ?? Self.buildSystemPrompt(cwd: workingDirectory)
     self.workingDirectory = workingDirectory
     self.shellExecutor = ShellExecutor(workingDirectory: workingDirectory)
+    self.skillLoader = SkillLoader(directory: skillsDirectory ?? "\(workingDirectory)/skills")
+    self.systemPrompt =
+      systemPrompt
+      ?? Self.buildSystemPrompt(
+        cwd: workingDirectory,
+        skillDescriptions: self.skillLoader.descriptions
+      )
   }
 
   // MARK: - Agent loop
@@ -105,15 +113,21 @@ public final class Agent {
     }
   }
 
-  public static func buildSystemPrompt(cwd: String) -> String {
-    """
-    You are a coding agent at \(cwd). Use tools to solve tasks. \
-    Act, don't explain.
+  public static func buildSystemPrompt(cwd: String, skillDescriptions: String = "") -> String {
+    var prompt = """
+      You are a coding agent at \(cwd). Use tools to solve tasks. \
+      Act, don't explain.
 
-    - Prefer read_file/write_file/edit_file over bash for file operations
-    - Always check tool results before proceeding
-    - Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
-    """
+      - Prefer read_file/write_file/edit_file over bash for file operations
+      - Always check tool results before proceeding
+      - Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
+      """
+
+    if !skillDescriptions.isEmpty {
+      prompt += "\nUse load_skill to access specialized knowledge.\n\nSkills available:\n\(skillDescriptions)"
+    }
+
+    return prompt
   }
 }
 
@@ -237,6 +251,20 @@ extension Agent {
         ]),
         "required": .array(["prompt"])
       ])
+    ),
+    ToolDefinition(
+      name: "load_skill",
+      description: "Load specialized knowledge by name.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "name": .object([
+            "type": "string",
+            "description": "Skill name to load"
+          ])
+        ]),
+        "required": .array(["name"])
+      ])
     )
   ]
 
@@ -247,7 +275,8 @@ extension Agent {
       "write_file": executeWriteFile,
       "edit_file": executeEditFile,
       "todo": executeTodo,
-      "agent": executeAgent
+      "agent": executeAgent,
+      "load_skill": executeLoadSkill
     ]
 
     guard let handler = handlers[name] else {
@@ -421,6 +450,13 @@ extension Agent {
     } catch {
       return .failure(.executionFailed("\(error)"))
     }
+  }
+
+  private func executeLoadSkill(_ input: JSONValue) async -> Result<String, ToolError> {
+    guard let name = input["name"]?.stringValue else {
+      return .failure(.missingParameter("name"))
+    }
+    return .success(skillLoader.content(for: name))
   }
 
   // MARK: Helpers

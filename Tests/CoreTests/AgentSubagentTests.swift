@@ -72,11 +72,11 @@ struct SubagentTests {
 
     _ = try await agent.run(query: "parent query")
 
-    // Subagent request (index 1) should have only 4 tools (no agent, no todo)
+    // Subagent request (index 1) should have only 5 tools (no agent, no todo)
     let subagentTools = mock.requests[1].tools ?? []
     let toolNames = Set(subagentTools.map(\.name))
-    #expect(toolNames.count == 4)
-    #expect(toolNames == ["bash", "read_file", "write_file", "edit_file"])
+    #expect(toolNames.count == 5)
+    #expect(toolNames == ["bash", "read_file", "write_file", "edit_file", "load_skill"])
     #expect(!toolNames.contains("agent"))
     #expect(!toolNames.contains("todo"))
   }
@@ -109,12 +109,11 @@ struct SubagentTests {
     let lastMessage = try #require(parentMessages.last)
     #expect(lastMessage.role == .user)
 
-    let hasSubagentResult = lastMessage.content.contains(where: {
-      if case .toolResult(let id, let content, let isError) = $0 {
-        return id == "t1" && content == "subtask result text" && !isError
+    let hasSubagentResult = lastMessage.content.contains {
+      isToolResult($0) { id, content, isError in
+        id == "t1" && content == "subtask result text" && !isError
       }
-      return false
-    })
+    }
     #expect(hasSubagentResult)
   }
 
@@ -150,12 +149,11 @@ struct SubagentTests {
     // Parent's final request should contain tool_result with iteration limit message
     let parentMessages = mock.requests[31].messages
     let lastMessage = try #require(parentMessages.last)
-    let hasLimitMessage = lastMessage.content.contains(where: {
-      if case .toolResult(_, let content, _) = $0 {
-        return content.contains("reached iteration limit")
+    let hasLimitMessage = lastMessage.content.contains {
+      isToolResult($0) { _, content, _ in
+        content.contains("reached iteration limit")
       }
-      return false
-    })
+    }
     #expect(hasLimitMessage)
   }
 
@@ -187,9 +185,7 @@ struct SubagentTests {
     let parentMessages = mock.requests[2].messages
     let lastMessage = try #require(parentMessages.last)
     let toolContent = lastMessage.content.compactMap { block -> String? in
-      if case .toolResult(_, let content, _) = block {
-        return content
-      }
+      if case .toolResult(_, let content, _) = block { return content }
       return nil
     }.first
     let content = try #require(toolContent)
@@ -222,12 +218,9 @@ struct SubagentTests {
     // Parent's final request should contain "(no output)" tool_result
     let parentMessages = mock.requests[2].messages
     let lastMessage = try #require(parentMessages.last)
-    let hasNoOutput = lastMessage.content.contains(where: {
-      if case .toolResult(_, let content, _) = $0 {
-        return content == "(no output)"
-      }
-      return false
-    })
+    let hasNoOutput = lastMessage.content.contains {
+      isToolResult($0) { _, content, _ in content == "(no output)" }
+    }
     #expect(hasNoOutput)
   }
 
@@ -260,12 +253,11 @@ struct SubagentTests {
     // Parent's second request should contain tool_result with error message
     let parentMessages = mock.requests[2].messages
     let lastMessage = try #require(parentMessages.last)
-    let hasErrorResult = lastMessage.content.contains(where: {
-      if case .toolResult(_, let content, let isError) = $0 {
-        return content.contains("Subagent failed:") && isError
+    let hasErrorResult = lastMessage.content.contains {
+      isToolResult($0) { _, content, isError in
+        content.contains("Subagent failed:") && isError
       }
-      return false
-    })
+    }
     #expect(hasErrorResult)
   }
 }
@@ -305,12 +297,11 @@ struct SubagentIsolationTests {
 
     let subagentMessages = mock.requests[2].messages
     let lastMessage = try #require(subagentMessages.last)
-    let hasRejection = lastMessage.content.contains(where: {
-      if case .toolResult(_, let content, let isError) = $0 {
-        return content.contains("not allowed") && isError
+    let hasRejection = lastMessage.content.contains {
+      isToolResult($0) { _, content, isError in
+        content.contains("not allowed") && isError
       }
-      return false
-    })
+    }
     #expect(hasRejection)
   }
 
@@ -353,12 +344,11 @@ struct SubagentIsolationTests {
 
     let subagentMessages = mock.requests[2].messages
     let lastMessage = try #require(subagentMessages.last)
-    let hasRejection = lastMessage.content.contains(where: {
-      if case .toolResult(_, let content, let isError) = $0 {
-        return content.contains("not allowed") && isError
+    let hasRejection = lastMessage.content.contains {
+      isToolResult($0) { _, content, isError in
+        content.contains("not allowed") && isError
       }
-      return false
-    })
+    }
     #expect(hasRejection)
   }
 
@@ -439,12 +429,11 @@ struct SubagentIsolationTests {
     #expect(!hasBashToolUse, "Parent messages should not contain subagent's internal tool calls")
 
     let lastMessage = try #require(parentMessages.last)
-    let hasSubagentResult = lastMessage.content.contains(where: {
-      if case .toolResult(let id, let content, _) = $0 {
-        return id == "t1" && content == "subtask done"
+    let hasSubagentResult = lastMessage.content.contains {
+      isToolResult($0) { id, content, _ in
+        id == "t1" && content == "subtask done"
       }
-      return false
-    })
+    }
     #expect(hasSubagentResult)
   }
 }

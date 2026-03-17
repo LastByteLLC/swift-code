@@ -72,13 +72,17 @@ struct SubagentTests {
 
     _ = try await agent.run(query: "parent query")
 
-    // Subagent request (index 1) should have only 5 tools (no agent, no todo)
+    // Subagent request (index 1) should have only 7 tools
+    // (no agent, no todo, no compact, no task_create, no task_update)
     let subagentTools = mock.requests[1].tools ?? []
     let toolNames = Set(subagentTools.map(\.name))
-    #expect(toolNames.count == 5)
-    #expect(toolNames == ["bash", "read_file", "write_file", "edit_file", "load_skill"])
-    #expect(!toolNames.contains("agent"))
-    #expect(!toolNames.contains("todo"))
+    #expect(toolNames.count == 7)
+    #expect(
+      toolNames == [
+        "bash", "read_file", "write_file", "edit_file", "load_skill",
+        "task_list", "task_get"
+      ]
+    )
   }
 
   @Test func subagentResultFlowsToParent() async throws {

@@ -2,7 +2,7 @@
 
 Exploring the architecture of coding agents by rebuilding a Claude Code-style CLI from scratch in Swift.
 
-> **Current progress:** Stage 06 of 08 — context compaction with 3-layer strategy (micro, auto, manual)
+> **Current progress:** Stage 07 of 08 — persistent task system with file-based dependency DAG
 
 ![demo](demo.gif)
 
@@ -85,7 +85,7 @@ The features that make an agent feel like a usable product: context, memory mana
 | **04** | Subagents: recursive loop with fresh context                 | `04-subagents`          |
 | **05** | Skill loading: `.md` files injected as tool results          | `05-skill-loading`      |
 | **06** | Context compaction: 3-layer strategy (micro, auto, manual)   | `06-context-compaction` |
-| 07     | Task system: file-based CRUD with dependency DAG             | —                       |
+| **07** | Task system: file-based CRUD with dependency DAG             | `07-task-system`        |
 | 08     | Background tasks: `Task {}` + actor-based notification queue | —                       |
 
 ## Architecture

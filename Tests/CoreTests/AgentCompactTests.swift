@@ -11,16 +11,16 @@ struct CompactToolTests {
     let defaultTools = Agent.toolDefinitions
     let compactTool = defaultTools.first { $0.name == "compact" }
     #expect(compactTool != nil)
-    #expect(defaultTools.count == 8)
+    #expect(defaultTools.count == 12)
   }
 
   @Test func compactToolAbsentFromSubagentConfig() {
     let subagentTools = Agent.toolDefinitions.filter {
-      $0.name != "agent" && $0.name != "todo" && $0.name != "compact"
+      !Set(["agent", "todo", "compact", "task_create", "task_update"]).contains($0.name)
     }
     let compactTool = subagentTools.first { $0.name == "compact" }
     #expect(compactTool == nil)
-    #expect(subagentTools.count == 5)
+    #expect(subagentTools.count == 7)
   }
 
   @Test func executeCompactReturnsSuccessMarker() async {

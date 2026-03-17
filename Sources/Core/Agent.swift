@@ -9,7 +9,7 @@ public enum Limits {
 }
 
 public final class Agent {
-  public static let version = "0.6.0"
+  public static let version = "0.7.0"
 
   private static let todoReminderThreshold = 3
 
@@ -21,7 +21,8 @@ public final class Agent {
   private let shellExecutor: ShellExecutor
   private let skillLoader: SkillLoader
   private let contextCompactor: ContextCompactor
-  private let todoManager = TodoManager()
+  private let todoManager: TodoManager
+  private let taskManager: TaskManager
 
   private var messages: [Message] = []
 
@@ -42,6 +43,8 @@ public final class Agent {
       transcriptDirectory: "\(workingDirectory)/.transcripts",
       tokenThreshold: tokenThreshold
     )
+    self.todoManager = TodoManager()
+    self.taskManager = TaskManager(directory: "\(workingDirectory)/.tasks")
     self.systemPrompt =
       systemPrompt
       ?? Self.buildSystemPrompt(
@@ -153,6 +156,8 @@ public final class Agent {
       - Prefer read_file/write_file/edit_file over bash for file operations
       - Always check tool results before proceeding
       - Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
+      - Use task tools for persistent multi-step work with dependencies. \
+      Tasks survive context compaction and process restarts.
       """
 
     if !skillDescriptions.isEmpty {
@@ -311,6 +316,76 @@ extension Agent {
         ]),
         "required": .array([])
       ])
+    ),
+    ToolDefinition(
+      name: "task_create",
+      description: "Create a persistent task. Tasks survive context compaction and process restarts.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "subject": .object([
+            "type": "string",
+            "description": "Short title for the task"
+          ]),
+          "description": .object([
+            "type": "string",
+            "description": "Detailed description of the task"
+          ])
+        ]),
+        "required": .array(["subject"])
+      ])
+    ),
+    ToolDefinition(
+      name: "task_update",
+      description: "Update a task's status or dependencies.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "task_id": .object([
+            "type": "integer",
+            "description": "The task ID to update"
+          ]),
+          "status": .object([
+            "type": "string",
+            "enum": .array(["pending", "in_progress", "completed"]),
+            "description": "New status for the task"
+          ]),
+          "add_blocked_by": .object([
+            "type": "array",
+            "items": .object(["type": "integer"]),
+            "description": "Task IDs that block this task"
+          ]),
+          "add_blocks": .object([
+            "type": "array",
+            "items": .object(["type": "integer"]),
+            "description": "Task IDs that this task blocks"
+          ])
+        ]),
+        "required": .array(["task_id"])
+      ])
+    ),
+    ToolDefinition(
+      name: "task_list",
+      description: "List all tasks with status markers and dependency info.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([:]),
+        "required": .array([])
+      ])
+    ),
+    ToolDefinition(
+      name: "task_get",
+      description: "Get detailed info about a specific task.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "task_id": .object([
+            "type": "integer",
+            "description": "The task ID to retrieve"
+          ])
+        ]),
+        "required": .array(["task_id"])
+      ])
     )
   ]
 
@@ -323,7 +398,11 @@ extension Agent {
       "todo": executeTodo,
       "agent": executeAgent,
       "load_skill": executeLoadSkill,
-      "compact": executeCompact
+      "compact": executeCompact,
+      "task_create": executeTaskCreate,
+      "task_update": executeTaskUpdate,
+      "task_list": executeTaskList,
+      "task_get": executeTaskGet
     ]
 
     guard let handler = handlers[name] else {
@@ -508,6 +587,60 @@ extension Agent {
 
   private func executeCompact(_ input: JSONValue) async -> Result<String, ToolError> { .success("Compressing...") }
 
+  private func executeTaskCreate(_ input: JSONValue) async -> Result<String, ToolError> {
+    guard let subject = input["subject"]?.stringValue else {
+      return .failure(.missingParameter("subject"))
+    }
+
+    let description = input["description"]?.stringValue ?? ""
+
+    do {
+      let result = try taskManager.create(subject: subject, description: description)
+      return .success(result)
+    } catch {
+      return .failure(.executionFailed("\(error)"))
+    }
+  }
+
+  private func executeTaskUpdate(_ input: JSONValue) async -> Result<String, ToolError> {
+    guard let taskId = input["task_id"]?.intValue else {
+      return .failure(.missingParameter("task_id"))
+    }
+
+    let status = input["status"]?.stringValue
+    let addBlockedBy = input["add_blocked_by"]?.arrayValue?.compactMap(\.intValue) ?? []
+    let addBlocks = input["add_blocks"]?.arrayValue?.compactMap(\.intValue) ?? []
+
+    do {
+      let result = try taskManager.update(
+        taskId: taskId,
+        status: status,
+        addBlockedBy: addBlockedBy,
+        addBlocks: addBlocks
+      )
+      return .success(result)
+    } catch {
+      return .failure(.executionFailed("\(error)"))
+    }
+  }
+
+  private func executeTaskList(_ input: JSONValue) async -> Result<String, ToolError> {
+    .success(taskManager.listAll())
+  }
+
+  private func executeTaskGet(_ input: JSONValue) async -> Result<String, ToolError> {
+    guard let taskId = input["task_id"]?.intValue else {
+      return .failure(.missingParameter("task_id"))
+    }
+
+    do {
+      let result = try taskManager.get(taskId: taskId)
+      return .success(result)
+    } catch {
+      return .failure(.executionFailed("\(error)"))
+    }
+  }
+
   // MARK: Helpers
 
   struct ToolProcessingResult {
@@ -611,7 +744,7 @@ extension Agent {
 
     static let subagent = LoopConfig(
       tools: Agent.toolDefinitions.filter {
-        !Set(["agent", "todo", "compact"]).contains($0.name)
+        !Set(["agent", "todo", "compact", "task_create", "task_update"]).contains($0.name)
       },
       maxIterations: 30,
       enableNag: false,

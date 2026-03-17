@@ -45,5 +45,6 @@ tests/results/
 .ralphex/progress/
 .ralphex/config
 
-# Transcripts
+# Agent runtime data
 .transcripts/
+.tasks/

@@ -75,6 +75,32 @@ func isToolResult(
   return false
 }
 
+func extractJobId(_ confirmation: String) throws -> String {
+  // Parses "Background job {id} started: ..."
+  let parts = confirmation.components(separatedBy: " ")
+  guard parts.count >= 3, parts[0] == "Background", parts[1] == "job" else {
+    throw TestError.unexpectedFormat("Expected 'Background job {id} started: ...', got: \(confirmation)")
+  }
+  return parts[2]
+}
+
+enum TestError: Error {
+  case unexpectedFormat(String)
+}
+
+func backgroundRunResponse(id: String, command: String) -> APIResponse {
+  makeResponse(
+    content: [
+      .toolUse(
+        id: id,
+        name: "background_run",
+        input: .object(["command": .string(command)])
+      )
+    ],
+    stopReason: .toolUse
+  )
+}
+
 func toolUseResponses(count: Int) -> [APIResponse] {
   (0..<count).map { index in
     makeResponse(

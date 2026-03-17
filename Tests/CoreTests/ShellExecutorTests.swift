@@ -40,11 +40,10 @@ struct ShellResultFormattedTests {
 @Suite("ShellExecutor dangerous command blocking")
 struct DangerousCommandTests {
   @Test(arguments: ["sudo rm -rf /tmp/test", "rm -rf /", "shutdown -h now"])
-  func blocksDangerousCommands(command: String) async throws {
-    let executor = ShellExecutor()
-    let result = try await executor.execute(command)
-    #expect(result.exitCode == 1)
-    #expect(result.stderr.contains("Dangerous command blocked"))
+  func blocksDangerousCommands(command: String) async {
+    await #expect(throws: ShellExecutorError.self) {
+      try await ShellExecutor().execute(command)
+    }
   }
 
   @Test func allowsSafeCommands() async throws {
@@ -52,5 +51,31 @@ struct DangerousCommandTests {
     let result = try await executor.execute("echo safe")
     #expect(result.exitCode == 0)
     #expect(result.stdout.contains("safe"))
+  }
+}
+
+// MARK: - Timeout support
+
+@Suite("ShellExecutor timeout")
+struct ShellExecutorTimeoutTests {
+  @Test func normalExecutionWithTimeout() async throws {
+    let executor = ShellExecutor()
+    let result = try await executor.execute("echo hello", timeout: 5.0)
+    #expect(result.exitCode == 0)
+    #expect(result.stdout.contains("hello"))
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func timeoutFiresForLongRunningCommand() async {
+    await #expect(throws: ShellExecutorError.self) {
+      try await ShellExecutor().execute("sleep 10", timeout: 0.5)
+    }
+  }
+
+  @Test(.timeLimit(.minutes(1)))
+  func timeoutThrowsCorrectError() async {
+    await #expect(throws: ShellExecutorError.timeout(seconds: 1)) {
+      try await ShellExecutor().execute("sleep 10", timeout: 1.0)
+    }
   }
 }

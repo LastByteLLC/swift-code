@@ -24,6 +24,11 @@ public struct ShellResult: Sendable {
   }
 }
 
+public enum ShellExecutorError: Error, Equatable {
+  case blockedCommand(String)
+  case timeout(seconds: Int)
+}
+
 public struct ShellExecutor: Sendable {
   private static let dangerousPatterns = [
     "rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"
@@ -36,14 +41,13 @@ public struct ShellExecutor: Sendable {
   }
 
   /// Run a shell command and capture stdout, stderr, and exit code.
-  /// Blocking calls occupy a cooperative pool thread — fine for sequential usage.
-  public func execute(_ command: String) async throws -> ShellResult {
-    if let blockedCommand = Self.dangerousPatterns.first(where: { command.contains($0) }) {
-      return ShellResult(
-        stdout: "",
-        stderr: "Error: Dangerous command blocked (matched '\(blockedCommand)')",
-        exitCode: 1
-      )
+  /// Optionally terminates the process via SIGTERM if the timeout deadline passes.
+  public func execute(
+    _ command: String,
+    timeout: TimeInterval? = nil
+  ) async throws -> ShellResult {
+    if let matchedPattern = Self.dangerousPatterns.first(where: { command.contains($0) }) {
+      throw ShellExecutorError.blockedCommand(matchedPattern)
     }
 
     let cwd = workingDirectory
@@ -60,10 +64,33 @@ public struct ShellExecutor: Sendable {
 
       try process.run()
 
+      var timer: DispatchSourceTimer?
+      if let timeout {
+        let source = DispatchSource.makeTimerSource()
+        source.schedule(deadline: .now() + timeout)
+        source.setEventHandler {
+          if process.isRunning {
+            process.terminate()
+          }
+        }
+        source.resume()
+        timer = source
+      }
+
       // Read pipe data BEFORE waitUntilExit() to avoid deadlock
       let stdoutData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
       let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
       process.waitUntilExit()
+
+      timer?.cancel()
+
+      if let timeout {
+        let wasTerminated =
+          process.terminationReason == .uncaughtSignal && process.terminationStatus == SIGTERM
+        if wasTerminated {
+          throw ShellExecutorError.timeout(seconds: Int(timeout))
+        }
+      }
 
       return ShellResult(
         stdout: String(data: stdoutData, encoding: .utf8) ?? "",

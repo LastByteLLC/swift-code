@@ -87,3 +87,47 @@ struct TodoToolDispatchTests {
     #expect(output.contains("[ ] My task"))
   }
 }
+
+// MARK: - Background tool dispatch
+
+@Suite("Background tool dispatch")
+struct BackgroundToolDispatchTests {
+  @Test func backgroundRunReturnsConfirmation() async throws {
+    let (agent, _) = makeAgent()
+    let result = await agent.executeTool(
+      name: "background_run",
+      input: .object(["command": "echo hello"])
+    )
+    let output = try result.get()
+    #expect(output.contains("Background job"))
+    #expect(output.contains("started"))
+  }
+
+  @Test func backgroundRunMissingCommandReturnsError() async {
+    let (agent, _) = makeAgent()
+    let result = await agent.executeTool(
+      name: "background_run",
+      input: .object([:])
+    )
+    #expect(result == .failure(.missingParameter("command")))
+  }
+
+  @Test func backgroundCheckWithNoJobsReturnsEmpty() async throws {
+    let (agent, _) = makeAgent()
+    let result = await agent.executeTool(
+      name: "background_check",
+      input: .object([:])
+    )
+    let output = try result.get()
+    #expect(output == "No background jobs.")
+  }
+
+  @Test(arguments: Agent.LoopConfig.subagentExcludedTools)
+  func subagentExcludesTool(toolName: String) {
+    let subagentTools = Agent.toolDefinitions.filter {
+      !Agent.LoopConfig.subagentExcludedTools.contains($0.name)
+    }
+    let names = Set(subagentTools.map(\.name))
+    #expect(!names.contains(toolName))
+  }
+}

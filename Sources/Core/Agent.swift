@@ -2,14 +2,20 @@
 import Foundation
 
 public enum Limits {
+  // Output/API
   public static let maxOutputSize = 50_000
-  public static let defaultTokenThreshold = 50_000
   public static let defaultMaxTokens = 4096
   static let logPreviewLength = 200
+  // Compaction
+  public static let defaultTokenThreshold = 50_000
+  // Background
+  public static let backgroundTimeout: TimeInterval = 300
+  public static let backgroundCommandPreview = 80
+  public static let backgroundResultPreview = 500
 }
 
 public final class Agent {
-  public static let version = "0.7.0"
+  public static let version = "0.8.0"
 
   private static let todoReminderThreshold = 3
 
@@ -23,6 +29,7 @@ public final class Agent {
   private let contextCompactor: ContextCompactor
   private let todoManager: TodoManager
   private let taskManager: TaskManager
+  let backgroundManager: BackgroundManager
 
   private var messages: [Message] = []
 
@@ -45,6 +52,7 @@ public final class Agent {
     )
     self.todoManager = TodoManager()
     self.taskManager = TaskManager(directory: "\(workingDirectory)/.tasks")
+    self.backgroundManager = BackgroundManager(executor: self.shellExecutor)
     self.systemPrompt =
       systemPrompt
       ?? Self.buildSystemPrompt(
@@ -71,8 +79,6 @@ public final class Agent {
     var messages = initialMessages
     var turnsWithoutTodo = 0
     var iteration = 0
-    var lastAssistantText = ""
-
     let allowedTools = Set(config.tools.map(\.name))
 
     while true {
@@ -80,10 +86,14 @@ public final class Agent {
 
       iteration += 1
       if iteration > config.maxIterations {
-        return (lastAssistantText + "\n(\(config.label) reached iteration limit)", messages)
+        let lastText = messages.last?.content.textContent ?? ""
+        return (lastText + "\n(\(config.label) reached iteration limit)", messages)
       }
 
       messages = await applyCompaction(messages)
+      if config.drainBackground {
+        messages = await drainBackgroundNotifications(messages)
+      }
 
       let request = APIRequest(
         model: model,
@@ -95,12 +105,9 @@ public final class Agent {
 
       let response = try await apiClient.createMessage(request: request)
       messages.append(Message(role: .assistant, content: response.content))
-      lastAssistantText = response.content.textContent
 
-      for block in response.content {
-        if case .text(let text) = block {
-          print("[\(config.label)] \(ANSIColor.cyan)\(text)\(ANSIColor.reset)")
-        }
+      for case .text(let text) in response.content {
+        print("[\(config.label)] \(ANSIColor.cyan)\(text)\(ANSIColor.reset)")
       }
 
       guard response.stopReason == .toolUse else {
@@ -132,8 +139,6 @@ public final class Agent {
     }
   }
 
-  // MARK: - Compaction
-
   private func applyCompaction(_ messages: [Message]) async -> [Message] {
     var compacted = messages
     contextCompactor.microCompact(messages: &compacted)
@@ -148,6 +153,36 @@ public final class Agent {
     return compacted
   }
 
+  func drainBackgroundNotifications(_ messages: [Message]) async -> [Message] {
+    let notifications = await backgroundManager.drainNotifications()
+    guard !notifications.isEmpty else {
+      return messages
+    }
+
+    let text =
+      notifications
+      .map { "[bg:\($0.jobId)] \($0.status.rawValue): \($0.result)" }
+      .joined(separator: "\n")
+
+    var result = messages
+    let wrappedText = "<background-results>\n\(text)\n</background-results>"
+
+    // Avoid consecutive user messages (violates API alternation requirement).
+    // If last message is user, append to its content; otherwise add new user message.
+    if let lastMessage = result.last, lastMessage.role == .user {
+      var updatedContent = lastMessage.content
+      updatedContent.append(.text(wrappedText))
+      result[result.count - 1] = Message(role: .user, content: updatedContent)
+    } else {
+      result.append(.user(wrappedText))
+    }
+
+    result.append(.assistant("Noted background results."))
+
+    print("[background] \(ANSIColor.dim)\(notifications.count) result(s) injected\(ANSIColor.reset)")
+    return result
+  }
+
   public static func buildSystemPrompt(cwd: String, skillDescriptions: String = "") -> String {
     var prompt = """
       You are a coding agent at \(cwd). Use tools to solve tasks. \
@@ -158,6 +193,8 @@ public final class Agent {
       - Use the todo tool to plan multi-step tasks. Mark in_progress before starting, completed when done.
       - Use task tools for persistent multi-step work with dependencies. \
       Tasks survive context compaction and process restarts.
+      - Use background_run for long-running commands (builds, tests, installs). \
+      Check with background_check.
       """
 
     if !skillDescriptions.isEmpty {
@@ -386,6 +423,37 @@ extension Agent {
         ]),
         "required": .array(["task_id"])
       ])
+    ),
+    ToolDefinition(
+      name: "background_run",
+      description: """
+        Run a command in the background. Returns job_id immediately. \
+        Use for long-running commands (builds, tests, installs).
+        """,
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "command": .object([
+            "type": "string",
+            "description": "The shell command to execute in the background"
+          ])
+        ]),
+        "required": .array(["command"])
+      ])
+    ),
+    ToolDefinition(
+      name: "background_check",
+      description: "Check background job status. Omit job_id to list all.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "job_id": .object([
+            "type": "string",
+            "description": "The job ID to check"
+          ])
+        ]),
+        "required": .array([])
+      ])
     )
   ]
 
@@ -402,7 +470,9 @@ extension Agent {
       "task_create": executeTaskCreate,
       "task_update": executeTaskUpdate,
       "task_list": executeTaskList,
-      "task_get": executeTaskGet
+      "task_get": executeTaskGet,
+      "background_run": executeBackgroundRun,
+      "background_check": executeBackgroundCheck
     ]
 
     guard let handler = handlers[name] else {
@@ -422,6 +492,8 @@ extension Agent {
     do {
       let result = try await shellExecutor.execute(command)
       return .success(result.formatted)
+    } catch ShellExecutorError.blockedCommand(let pattern) {
+      return .failure(.executionFailed("Dangerous command blocked (matched '\(pattern)')"))
     } catch {
       return .failure(.executionFailed("\(error)"))
     }
@@ -444,8 +516,7 @@ extension Agent {
 
         if let limit = input["limit"]?.intValue, limit < lines.count {
           output =
-            lines.prefix(limit).joined(separator: "\n")
-            + "\n... (\(lines.count - limit) more lines)"
+            lines.prefix(limit).joined(separator: "\n") + "\n... (\(lines.count - limit) more lines)"
         } else {
           output = text
         }
@@ -641,6 +712,21 @@ extension Agent {
     }
   }
 
+  private func executeBackgroundRun(_ input: JSONValue) async -> Result<String, ToolError> {
+    guard let command = input["command"]?.stringValue else {
+      return .failure(.missingParameter("command"))
+    }
+
+    let confirmation = await backgroundManager.run(command: command)
+    return .success(confirmation)
+  }
+
+  private func executeBackgroundCheck(_ input: JSONValue) async -> Result<String, ToolError> {
+    let jobId = input["job_id"]?.stringValue
+    let result = await backgroundManager.check(jobId: jobId)
+    return .success(result)
+  }
+
   // MARK: Helpers
 
   struct ToolProcessingResult {
@@ -729,25 +815,33 @@ extension Agent {
 // MARK: - Configuration
 
 extension Agent {
-  fileprivate struct LoopConfig {
+  struct LoopConfig {
     let tools: [ToolDefinition]
     let maxIterations: Int
     let enableNag: Bool
+    let drainBackground: Bool
     let label: String
 
     static let `default` = LoopConfig(
       tools: Agent.toolDefinitions,
       maxIterations: .max,
       enableNag: true,
+      drainBackground: true,
       label: "agent"
     )
 
+    static let subagentExcludedTools: Set<String> = [
+      "agent", "todo", "compact", "task_create", "task_update",
+      "background_run", "background_check"
+    ]
+
     static let subagent = LoopConfig(
       tools: Agent.toolDefinitions.filter {
-        !Set(["agent", "todo", "compact", "task_create", "task_update"]).contains($0.name)
+        !subagentExcludedTools.contains($0.name)
       },
       maxIterations: 30,
       enableNag: false,
+      drainBackground: false,
       label: "subagent"
     )
   }

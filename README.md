@@ -2,8 +2,6 @@
 
 Exploring the architecture of coding agents by rebuilding a Claude Code-style CLI from scratch in Swift.
 
-> **Current progress:** Stage 07 of 08 — persistent task system with file-based dependency DAG
-
 ![demo](demo.gif)
 
 ## Why This Exists
@@ -69,24 +67,24 @@ Progress is tracked via git tags. The roadmap is split into two phases — core 
 
 The minimum viable agent: a loop and a small set of good tools.
 
-| Stage  | What It Adds                                                           | Tag                |
-| ------ | ---------------------------------------------------------------------- | ------------------ |
-| **00** | Bootstrap: SPM project, two-target layout, CI                          | `00-bootstrap`     |
-| **01** | Agent loop + bash tool                                                 | `01-agent-loop`    |
-| **02** | Tool dispatch: `read_file`, `write_file`, `edit_file` with path safety | `02-tool-dispatch` |
-| **03** | Todo tracking with nag reminder injection                              | `03-todo-write`    |
+| Stage | What It Adds                                                           | Tag                |
+| ----- | ---------------------------------------------------------------------- | ------------------ |
+| 00    | Bootstrap: SPM project, two-target layout, CI                          | `00-bootstrap`     |
+| 01    | Agent loop + bash tool                                                 | `01-agent-loop`    |
+| 02    | Tool dispatch: `read_file`, `write_file`, `edit_file` with path safety | `02-tool-dispatch` |
+| 03    | Todo tracking with nag reminder injection                              | `03-todo-write`    |
 
 ### Phase 2 — Product Mechanics
 
 The features that make an agent feel like a usable product: context, memory management, and persistence.
 
-| Stage  | What It Adds                                                 | Tag                     |
-| ------ | ------------------------------------------------------------ | ----------------------- |
-| **04** | Subagents: recursive loop with fresh context                 | `04-subagents`          |
-| **05** | Skill loading: `.md` files injected as tool results          | `05-skill-loading`      |
-| **06** | Context compaction: 3-layer strategy (micro, auto, manual)   | `06-context-compaction` |
-| **07** | Task system: file-based CRUD with dependency DAG             | `07-task-system`        |
-| 08     | Background tasks: `Task {}` + actor-based notification queue | —                       |
+| Stage | What It Adds                                                 | Tag                     |
+| ----- | ------------------------------------------------------------ | ----------------------- |
+| 04    | Subagents: recursive loop with fresh context                 | `04-subagents`          |
+| 05    | Skill loading: `.md` files injected as tool results          | `05-skill-loading`      |
+| 06    | Context compaction: 3-layer strategy (micro, auto, manual)   | `06-context-compaction` |
+| 07    | Task system: file-based CRUD with dependency DAG             | `07-task-system`        |
+| 08    | Background tasks: `Task {}` + actor-based notification queue | `08-background-tasks`   |
 
 ## Architecture
 

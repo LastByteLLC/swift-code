@@ -1,6 +1,6 @@
 import Foundation
 
-public final class ContextCompactor: Sendable {
+public struct ContextCompactor: Sendable {
   public static let keepRecent = 3
   public static let minContentLength = 100
 

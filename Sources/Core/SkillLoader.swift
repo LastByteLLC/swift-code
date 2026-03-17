@@ -1,6 +1,6 @@
 import Foundation
 
-public final class SkillLoader: Sendable {
+public struct SkillLoader: Sendable {
   public struct Skill: Sendable {
     public let name: String
     public let description: String

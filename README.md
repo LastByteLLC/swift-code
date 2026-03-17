@@ -92,18 +92,6 @@ The features that make an agent feel like a usable product: context, memory mana
 
 Two-target Swift Package Manager project:
 
-```
-swift-claude-code/
-├── Package.swift
-├── Sources/
-│   ├── Core/                ← library (all logic)
-│   │   ├── API/
-│   │   ├── Agent.swift      agent loop + tool dispatch
-│   │   └── ShellExecutor.swift
-│   └── cli/                 ← executable (@main entry point)
-└── Tests/CoreTests/
-```
-
 **Core** is the library — API client, shell executor, agent loop, tools, everything testable. **cli** is just the entry point. The executable is called `claude`.
 
 Raw HTTP to `POST https://api.anthropic.com/v1/messages` using [AsyncHTTPClient](https://github.com/swift-server/async-http-client). Works on both macOS and Linux.

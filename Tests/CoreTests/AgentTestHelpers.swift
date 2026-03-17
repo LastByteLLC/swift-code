@@ -36,13 +36,17 @@ final class MockAPIClient: APIClientProtocol, @unchecked Sendable {
 
 func makeAgent(
   mock: MockAPIClient = MockAPIClient(),
-  skillsDirectory: String? = nil
+  skillsDirectory: String? = nil,
+  workingDirectory: String = ".",
+  tokenThreshold: Int = Limits.defaultTokenThreshold
 ) -> (Agent, MockAPIClient) {
   let agent = Agent(
     apiClient: mock,
     model: "test-model",
     systemPrompt: "You are a test agent.",
-    skillsDirectory: skillsDirectory
+    workingDirectory: workingDirectory,
+    skillsDirectory: skillsDirectory,
+    tokenThreshold: tokenThreshold
   )
   return (agent, mock)
 }

@@ -3,12 +3,13 @@ import Foundation
 
 public enum Limits {
   public static let maxOutputSize = 50_000
+  public static let defaultTokenThreshold = 50_000
   public static let defaultMaxTokens = 4096
   static let logPreviewLength = 200
 }
 
 public final class Agent {
-  public static let version = "0.5.0"
+  public static let version = "0.6.0"
 
   private static let todoReminderThreshold = 3
 
@@ -19,6 +20,7 @@ public final class Agent {
 
   private let shellExecutor: ShellExecutor
   private let skillLoader: SkillLoader
+  private let contextCompactor: ContextCompactor
   private let todoManager = TodoManager()
 
   private var messages: [Message] = []
@@ -28,13 +30,18 @@ public final class Agent {
     model: String,
     systemPrompt: String? = nil,
     workingDirectory: String = ".",
-    skillsDirectory: String? = nil
+    skillsDirectory: String? = nil,
+    tokenThreshold: Int = Limits.defaultTokenThreshold
   ) {
     self.apiClient = apiClient
     self.model = model
     self.workingDirectory = workingDirectory
     self.shellExecutor = ShellExecutor(workingDirectory: workingDirectory)
     self.skillLoader = SkillLoader(directory: skillsDirectory ?? "\(workingDirectory)/skills")
+    self.contextCompactor = ContextCompactor(
+      transcriptDirectory: "\(workingDirectory)/.transcripts",
+      tokenThreshold: tokenThreshold
+    )
     self.systemPrompt =
       systemPrompt
       ?? Self.buildSystemPrompt(
@@ -73,6 +80,8 @@ public final class Agent {
         return (lastAssistantText + "\n(\(config.label) reached iteration limit)", messages)
       }
 
+      messages = await applyCompaction(messages)
+
       let request = APIRequest(
         model: model,
         maxTokens: Limits.defaultMaxTokens,
@@ -95,22 +104,45 @@ public final class Agent {
         return (response.content.textContent, messages)
       }
 
-      let (results, didUseTodo) = await processToolUses(
+      let toolProcessing = await processToolUses(
         response: response,
         allowedTools: allowedTools,
         label: config.label
       )
 
-      var toolResults = results
+      var toolResults = toolProcessing.results
       if config.enableNag {
-        turnsWithoutTodo = didUseTodo ? 0 : turnsWithoutTodo + 1
+        turnsWithoutTodo = toolProcessing.didUseTodo ? 0 : turnsWithoutTodo + 1
         if turnsWithoutTodo >= Self.todoReminderThreshold && todoManager.hasOpenItems() {
           toolResults.append(.text("Update your todos."))
         }
       }
 
       messages.append(Message(role: .user, content: toolResults))
+
+      if let compactFocus = toolProcessing.compactFocus {
+        print("[manual compact]")
+        messages = await contextCompactor.autoCompact(
+          messages: messages, using: apiClient, model: model, focus: compactFocus
+        )
+      }
     }
+  }
+
+  // MARK: - Compaction
+
+  private func applyCompaction(_ messages: [Message]) async -> [Message] {
+    var compacted = messages
+    contextCompactor.microCompact(messages: &compacted)
+
+    if contextCompactor.estimateTokens(from: compacted) > contextCompactor.tokenThreshold {
+      print("[auto_compact triggered]")
+      return await contextCompactor.autoCompact(
+        messages: compacted, using: apiClient, model: model, focus: nil
+      )
+    }
+
+    return compacted
   }
 
   public static func buildSystemPrompt(cwd: String, skillDescriptions: String = "") -> String {
@@ -265,6 +297,20 @@ extension Agent {
         ]),
         "required": .array(["name"])
       ])
+    ),
+    ToolDefinition(
+      name: "compact",
+      description: "Compress conversation history to free context space. Use when working on long tasks.",
+      inputSchema: .object([
+        "type": "object",
+        "properties": .object([
+          "focus": .object([
+            "type": "string",
+            "description": "What to preserve in the summary (e.g., 'file paths edited', 'current task progress')"
+          ])
+        ]),
+        "required": .array([])
+      ])
     )
   ]
 
@@ -276,7 +322,8 @@ extension Agent {
       "edit_file": executeEditFile,
       "todo": executeTodo,
       "agent": executeAgent,
-      "load_skill": executeLoadSkill
+      "load_skill": executeLoadSkill,
+      "compact": executeCompact
     ]
 
     guard let handler = handlers[name] else {
@@ -459,15 +506,24 @@ extension Agent {
     return .success(skillLoader.content(for: name))
   }
 
+  private func executeCompact(_ input: JSONValue) async -> Result<String, ToolError> { .success("Compressing...") }
+
   // MARK: Helpers
+
+  struct ToolProcessingResult {
+    let results: [ContentBlock]
+    let didUseTodo: Bool
+    let compactFocus: String?
+  }
 
   private func processToolUses(
     response: APIResponse,
     allowedTools: Set<String>,
     label: String
-  ) async -> (results: [ContentBlock], didUseTodo: Bool) {
+  ) async -> ToolProcessingResult {
     var results: [ContentBlock] = []
     var didUseTodo = false
+    var compactFocus: String?
 
     for case .toolUse(let id, let name, let input) in response.content {
       guard allowedTools.contains(name) else {
@@ -484,6 +540,10 @@ extension Agent {
         didUseTodo = true
       }
 
+      if name == "compact" {
+        compactFocus = input["focus"]?.stringValue ?? ""
+      }
+
       switch toolResult {
       case .success(let output):
         print("[\(label)] \(ANSIColor.dim)\(String(output.prefix(Limits.logPreviewLength)))\(ANSIColor.reset)")
@@ -495,7 +555,11 @@ extension Agent {
       }
     }
 
-    return (results, didUseTodo)
+    return ToolProcessingResult(
+      results: results,
+      didUseTodo: didUseTodo,
+      compactFocus: compactFocus
+    )
   }
 
   private func resolveSafePath(_ relativePath: String) -> Result<String, ToolError> {
@@ -546,7 +610,9 @@ extension Agent {
     )
 
     static let subagent = LoopConfig(
-      tools: Agent.toolDefinitions.filter { $0.name != "agent" && $0.name != "todo" },
+      tools: Agent.toolDefinitions.filter {
+        !Set(["agent", "todo", "compact"]).contains($0.name)
+      },
       maxIterations: 30,
       enableNag: false,
       label: "subagent"

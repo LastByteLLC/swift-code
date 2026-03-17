@@ -44,3 +44,6 @@ tests/results/
 # ralphex
 .ralphex/progress/
 .ralphex/config
+
+# Transcripts
+.transcripts/

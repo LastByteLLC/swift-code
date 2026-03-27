@@ -221,7 +221,8 @@ struct Junco: AsyncParsableCommand {
     let progress = ProgressBar(phrases: phrases)
     let wordCounter = WordCounter()
 
-    // Build pipeline callbacks
+    // Build pipeline callbacks — all user I/O happens here in the CLI layer,
+    // never inside the orchestrator actor (which would corrupt terminal state).
     let callbacks = PipelineCallbacks(
       onProgress: { step, total, description in
         let status = progress.render(step: step, total: total, tool: "", target: description)
@@ -240,7 +241,25 @@ struct Junco: AsyncParsableCommand {
           default:  return .skip
           }
         }
-        return .skip  // Non-interactive: auto-skip
+        return .skip
+      },
+      onPermission: { tool, target, detail in
+        Terminal.clearLine()
+        let prompt = PermissionService.promptText(tool: tool, target: target, detail: detail)
+        Terminal.line(Style.yellow(prompt))
+        if Terminal.isInteractive {
+          print("  [\(Style.cyan("y"))]es / [\(Style.cyan("n"))]o / [\(Style.cyan("a"))]lways allow? ", terminator: "")
+          fflush(stdout)
+          guard let choice = Swift.readLine()?.lowercased().trimmingCharacters(in: .whitespaces) else {
+            return .deny
+          }
+          switch choice {
+          case "y", "yes", "": return .allow
+          case "a", "always":  return .alwaysAllow
+          default:             return .deny
+          }
+        }
+        return .allow  // Non-interactive: auto-allow
       },
       onStream: { [wordCounter] chunk in
         wordCounter.add(chunk)

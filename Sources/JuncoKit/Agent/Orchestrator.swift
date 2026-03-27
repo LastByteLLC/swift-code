@@ -29,6 +29,7 @@ public actor Orchestrator {
 
   private var projectIndex: [IndexEntry] = []
   private var needsReindex = true
+  private var activeCallbacks: PipelineCallbacks = .none
 
   public private(set) var verbose: Bool = false
   public func setVerbose(_ value: Bool) { verbose = value }
@@ -94,6 +95,7 @@ public actor Orchestrator {
     var memory = WorkingMemory(query: query)
     lastDiffs = []
     lastBuildResult = nil
+    activeCallbacks = callbacks
 
     // Conversational short-circuit
     if let directResponse = handleConversational(query) {
@@ -548,6 +550,30 @@ public actor Orchestrator {
     )
   }
 
+  // MARK: - Permission Handling
+
+  /// Check permission: pre-approved rules first, then callback to CLI.
+  private func askPermission(tool: String, target: String, detail: String) async -> PermissionDecision {
+    // Check persistent always-allow rules
+    if permissionService.isAllowed(tool: tool, target: target) {
+      debug("Permission: \(tool) \(target) — pre-approved")
+      return .allow
+    }
+
+    // Ask the CLI via callback
+    if let handler = activeCallbacks.onPermission {
+      let decision = await handler(tool, target, detail)
+      // If user chose always-allow, persist the rule
+      if decision == .alwaysAllow {
+        permissionService.saveAlwaysAllow(tool: tool, target: target)
+      }
+      return decision
+    }
+
+    // No callback (pipe mode or tests) — auto-allow
+    return .allow
+  }
+
   // MARK: - Tool Execution (with permissions + diff capture)
 
   private func executeToolSafe(action: ToolAction, memory: inout WorkingMemory) async -> String {
@@ -570,8 +596,8 @@ public actor Orchestrator {
       return try files.read(path: path, maxTokens: Config.fileReadMaxTokens)
 
     case .write(let path, let content):
-      // Permission check
-      let decision = permissionService.ask(tool: "write", target: path, detail: "\(content.count) chars")
+      // Permission check via callback (CLI handles terminal I/O)
+      let decision = await askPermission(tool: "write", target: path, detail: "\(content.count) chars")
       guard decision != .deny else { return "DENIED: write to \(path)" }
 
       // JSC validation for JavaScript files (catch errors before writing)
@@ -591,7 +617,7 @@ public actor Orchestrator {
       return "Written \(path) (\(content.count) chars)"
 
     case .edit(let path, let find, let replace):
-      let decision = permissionService.ask(tool: "edit", target: path, detail: "replacing \(find.count) chars")
+      let decision = await askPermission(tool: "edit", target: path, detail: "replacing \(find.count) chars")
       guard decision != .deny else { return "DENIED: edit \(path)" }
 
       // Capture before content for diff
@@ -614,7 +640,7 @@ public actor Orchestrator {
       return "Edited \(path)"
 
     case .patch(let path, let diff):
-      let decision = permissionService.ask(tool: "edit", target: path, detail: "apply patch")
+      let decision = await askPermission(tool: "patch", target: path, detail: "apply unified diff")
       guard decision != .deny else { return "DENIED: patch \(path)" }
 
       let before = try? files.read(path: path, maxTokens: 2000)

@@ -126,7 +126,6 @@ public struct BrowserDiscovery: Sendable {
     let npxAvailable = await shellOutput("npx --yes chromedriver --version 2>/dev/null") != nil
 
     let driverPath = localDriver?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let major = versionClean.components(separatedBy: ".").first ?? ""
 
     return DetectedBrowser(
       name: "Google Chrome",

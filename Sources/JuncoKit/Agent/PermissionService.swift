@@ -1,18 +1,14 @@
-// PermissionService.swift — User confirmation before destructive actions
+// PermissionService.swift — Permission rules with persistent always-allow
 //
-// Prompts the user for confirmation before writes, edits, and dangerous
-// bash commands. Supports "always allow" rules persisted per-project.
+// IMPORTANT: This service NEVER reads from stdin. User interaction is handled
+// by the CLI via PipelineCallbacks.onPermission. The orchestrator calls
+// checkPermission() which returns .allow if pre-approved, .deny otherwise.
+// The CLI wrapper in the orchestrator's executeTool calls the callback.
 
 import Foundation
 
-/// Permission decisions.
-public enum PermissionDecision: Sendable {
-  case allow
-  case deny
-  case alwaysAllow
-}
-
-/// Manages permission prompts for file/shell operations.
+/// Manages persistent permission rules (always-allow).
+/// Does NOT prompt the user — that's the CLI's job via PipelineCallbacks.
 public struct PermissionService: Sendable {
   private let rulesPath: String
 
@@ -22,59 +18,25 @@ public struct PermissionService: Sendable {
     self.rulesPath = (dir as NSString).appendingPathComponent("permissions.json")
   }
 
-  /// Check if an action is pre-approved.
+  /// Check if an action is pre-approved by a stored rule.
+  /// Returns true if there's a matching always-allow rule.
   public func isAllowed(tool: String, target: String) -> Bool {
     let rules = loadRules()
-    // Check for always-allow rules
     return rules.contains { $0.tool == tool && (target.contains($0.pattern) || $0.pattern == "*") }
   }
 
-  /// Format a permission prompt for the user.
-  public static func promptText(tool: String, target: String, detail: String = "") -> String {
-    let icon: String
-    switch tool {
-    case "write": icon = "write"
-    case "edit": icon = "edit"
-    case "bash": icon = "run"
-    default: icon = tool
-    }
+  /// Save an always-allow rule.
+  public func saveAlwaysAllow(tool: String, target: String) {
+    saveRule(tool: tool, pattern: target)
+  }
 
-    var msg = "junco wants to \(icon): \(target)"
+  /// Format a permission prompt for display.
+  public static func promptText(tool: String, target: String, detail: String = "") -> String {
+    var msg = "junco wants to \(tool): \(target)"
     if !detail.isEmpty {
       msg += "\n  \(detail)"
     }
-    msg += "\n  [y]es / [n]o / [a]lways allow"
     return msg
-  }
-
-  /// Ask the user for permission (reads from stdin in raw mode).
-  /// Returns the decision. For non-interactive mode, returns .allow.
-  public func ask(tool: String, target: String, detail: String = "") -> PermissionDecision {
-    // If pre-approved, skip prompt
-    if isAllowed(tool: tool, target: target) {
-      return .allow
-    }
-
-    // Non-interactive: allow (pipe mode)
-    guard isatty(STDIN_FILENO) != 0 else { return .allow }
-
-    let prompt = Self.promptText(tool: tool, target: target, detail: detail)
-    print("\n\u{1B}[33m\(prompt)\u{1B}[0m ", terminator: "")
-    fflush(stdout)
-
-    // Read single character (temporarily in raw mode if not already)
-    guard let line = readLine() else { return .deny }
-    let choice = line.lowercased().trimmingCharacters(in: .whitespaces)
-
-    switch choice {
-    case "y", "yes", "":
-      return .allow
-    case "a", "always":
-      saveRule(tool: tool, pattern: target)
-      return .alwaysAllow
-    default:
-      return .deny
-    }
   }
 
   // MARK: - Rules Persistence

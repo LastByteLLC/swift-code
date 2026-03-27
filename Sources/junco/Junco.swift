@@ -8,6 +8,22 @@ import ArgumentParser
 import Foundation
 import JuncoKit
 
+/// Thread-safe word counter for streaming progress display.
+final class WordCounter: @unchecked Sendable {
+  private let lock = NSLock()
+  private var words = 0
+  private var buffer = ""
+
+  func add(_ chunk: String) {
+    lock.withLock {
+      buffer += chunk
+      words = buffer.split(separator: " ").count
+    }
+  }
+
+  var count: Int { lock.withLock { words } }
+}
+
 @main
 struct Junco: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
@@ -179,7 +195,7 @@ struct Junco: AsyncParsableCommand {
   ) async throws {
     let taskStart = Date()
     let progress = ProgressBar(phrases: phrases)
-    let streamFlag = ReindexFlag()  // Reuse as generic atomic bool
+    let wordCounter = WordCounter()
 
     // Build pipeline callbacks
     let callbacks = PipelineCallbacks(
@@ -202,14 +218,10 @@ struct Junco: AsyncParsableCommand {
         }
         return .skip  // Non-interactive: auto-skip
       },
-      onStream: { [streamFlag] chunk in
-        if !streamFlag.consume() {
-          // First chunk hasn't been flagged yet — this IS the first chunk
-        }
-        streamFlag.set()
-        Terminal.clearLine()
-        print(chunk, terminator: "")
-        fflush(stdout)
+      onStream: { [wordCounter] chunk in
+        wordCounter.add(chunk)
+        let count = wordCounter.count
+        Terminal.status("\(ThinkingPhrases.spinner(tick: count)) Generating... \(count) words")
       }
     )
 
@@ -224,18 +236,8 @@ struct Junco: AsyncParsableCommand {
       )
       Terminal.clearLine()
 
-      // If output was streamed, just add a newline; otherwise render normally
-      if result.wasStreamed && streamFlag.consume() {
-        print()  // Newline after streamed content
-        // Show toast for metadata
-        let elapsed = Date().timeIntervalSince(taskStart)
-        Toast.timing(
-          "\(result.memory.llmCalls) calls | ~\(result.memory.totalTokensUsed) tokens",
-          seconds: elapsed
-        )
-      } else {
-        await printResult(result, markdown: markdown, diffRenderer: diffRenderer, orchestrator: orchestrator)
-      }
+      // Always render with markdown — streaming just showed a progress counter
+      await printResult(result, markdown: markdown, diffRenderer: diffRenderer, orchestrator: orchestrator)
 
       // Build result toast
       if let buildResult = await orchestrator.lastBuildResult {

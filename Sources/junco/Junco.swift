@@ -56,6 +56,7 @@ struct Junco: AsyncParsableCommand {
     let fileTree = FileTreeRenderer(workingDirectory: cwd)
     let persistence = SessionPersistence(workingDirectory: cwd)
     let notifications = NotificationService(workingDirectory: cwd)
+    let translator = TranslationService()
     let markdown = MarkdownRenderer()
     let diffRenderer = DiffRenderer()
     let phrases = ThinkingPhrases(projectDirectory: cwd)
@@ -161,7 +162,8 @@ struct Junco: AsyncParsableCommand {
           trimmed, orchestrator: orchestrator, session: session,
           sessionStart: sessionStart, persistence: persistence,
           persistedSession: &persistedSession,
-          forker: forker, fileTree: fileTree
+          forker: forker, fileTree: fileTree,
+          translator: translator
         )
         continue
       }
@@ -170,10 +172,16 @@ struct Junco: AsyncParsableCommand {
       let parser = InputParser(workingDirectory: cwd)
       let parsed = parser.parse(trimmed)
       let urlContext = await parser.fetchURLs(parsed.urls)
-      let query = await session.processInput(parsed.query)
+
+      // Translation: detect language, translate to English if needed
+      let (translatedQuery, inputLang) = await translator.processInput(parsed.query)
+      if let lang = inputLang {
+        Toast.show("Detected \(lang) — translating to English for processing", level: .info)
+      }
+
+      let query = await session.processInput(translatedQuery)
 
       await session.saveCheckpoint()
-
       await bgRunner.markActive()
 
       try await runQuery(
@@ -182,7 +190,8 @@ struct Junco: AsyncParsableCommand {
         markdown: markdown, diffRenderer: diffRenderer,
         sessionStart: sessionStart, history: history,
         referencedFiles: parsed.referencedFiles, urlContext: urlContext,
-        persistedSession: &persistedSession, phrases: phrases
+        persistedSession: &persistedSession, phrases: phrases,
+        translator: translator
       )
 
       // Check for idle background tasks after each query
@@ -205,7 +214,8 @@ struct Junco: AsyncParsableCommand {
     referencedFiles: [String] = [],
     urlContext: String? = nil,
     persistedSession: inout PersistedSession,
-    phrases: ThinkingPhrases = ThinkingPhrases()
+    phrases: ThinkingPhrases = ThinkingPhrases(),
+    translator: TranslationService? = nil
   ) async throws {
     let taskStart = Date()
     let progress = ProgressBar(phrases: phrases)
@@ -250,8 +260,16 @@ struct Junco: AsyncParsableCommand {
       )
       Terminal.clearLine()
 
-      // Always render with markdown — streaming just showed a progress counter
-      await printResult(result, markdown: markdown, diffRenderer: diffRenderer, orchestrator: orchestrator)
+      // Translate output to session language if non-English session
+      var translatedInsight: String?
+      if let translator, await translator.isTranslating {
+        translatedInsight = await translator.processOutput(result.reflection.insight)
+      }
+
+      await printResult(
+        result, markdown: markdown, diffRenderer: diffRenderer,
+        orchestrator: orchestrator, translatedInsight: translatedInsight
+      )
 
       // Build result toast
       if let buildResult = await orchestrator.lastBuildResult {
@@ -299,7 +317,8 @@ struct Junco: AsyncParsableCommand {
     persistence: SessionPersistence,
     persistedSession: inout PersistedSession,
     forker: ConversationForker,
-    fileTree: FileTreeRenderer
+    fileTree: FileTreeRenderer,
+    translator: TranslationService
   ) async {
     let parts = cmd.split(separator: " ", maxSplits: 1)
     let directive = String(parts[0]).lowercased()
@@ -454,6 +473,51 @@ struct Junco: AsyncParsableCommand {
         }
       }
 
+    #if canImport(Speech)
+    case "/speak":
+      let duration = Double(arg ?? "5") ?? 5
+      Terminal.line(Style.dim("Listening for \(Int(duration))s... speak now"))
+      let speech = SpeechService()
+      let available = await speech.isAvailable
+      guard available else {
+        Terminal.line(Style.yellow("Speech recognition not available on this device."))
+        break
+      }
+      do {
+        let transcript = try await speech.transcribe(duration: duration)
+        if transcript.isEmpty {
+          Terminal.line(Style.dim("No speech detected."))
+        } else {
+          Terminal.line("Heard: \(Style.cyan(transcript))")
+          Terminal.line(Style.dim("Use this as your next query, or edit and submit."))
+        }
+      } catch {
+        Terminal.line(Style.red("Speech error: \(error)"))
+      }
+    #endif
+
+    case "/lang":
+      if let code = arg, !code.isEmpty {
+        await translator.setLanguage(code)
+        let isActive = await translator.isTranslating
+        if isActive {
+          Terminal.line(Style.green("Session language set to \(code).") + " Input/output will be translated.")
+        } else {
+          Terminal.line(Style.yellow("Language \(code) set but translation models not installed."))
+          Terminal.line(Style.dim("Download in System Settings > General > Language & Region > Translation Languages"))
+        }
+      } else {
+        let current = await translator.currentLanguage
+        if let lang = current {
+          Terminal.line("Session language: \(Style.cyan(lang))")
+          let active = await translator.isTranslating
+          Terminal.line("Translation active: \(active ? Style.green("yes") : Style.yellow("no (models not installed)"))")
+        } else {
+          Terminal.line("Session language: \(Style.dim("English (default)"))")
+        }
+        Terminal.line(Style.dim("Set with: /lang es, /lang fr, /lang de, etc."))
+      }
+
     default:
       Terminal.line(Style.yellow("Unknown: \(directive)"))
       Terminal.line(Style.dim("Type /help for commands."))
@@ -477,6 +541,8 @@ struct Junco: AsyncParsableCommand {
       ("/search <query>", "Web search (DuckDuckGo)"),
       ("/notes [key=val]", "Project scratchpad"),
       ("/session", "Show session history"),
+      ("/lang [code]", "Set/show session language"),
+      ("/speak [secs]", "Voice input (on-device speech)"),
       ("/git", "Branch and status"),
       ("/context", "Multi-turn context"),
       ("/pastes", "Clipboard paste list"),
@@ -495,10 +561,12 @@ struct Junco: AsyncParsableCommand {
     _ result: RunResult,
     markdown: MarkdownRenderer,
     diffRenderer: DiffRenderer,
-    orchestrator: Orchestrator
+    orchestrator: Orchestrator,
+    translatedInsight: String? = nil
   ) async {
     let mem = result.memory
     let ref = result.reflection
+    let insight = translatedInsight ?? ref.insight
 
     // Plan
     if let plan = mem.plan {
@@ -532,11 +600,11 @@ struct Junco: AsyncParsableCommand {
       Terminal.line(buildResult)
     }
 
-    // Response (rendered as markdown)
+    // Response (rendered as markdown, possibly translated)
     if ref.succeeded {
-      Terminal.line(Style.green("Done: ") + markdown.render(ref.insight))
+      Terminal.line(Style.green("Done: ") + markdown.render(insight))
     } else {
-      Terminal.line(Style.yellow("Partial: ") + markdown.render(ref.insight))
+      Terminal.line(Style.yellow("Partial: ") + markdown.render(insight))
     }
     if !ref.improvement.isEmpty {
       Terminal.line(Style.dim("  Learned: \(ref.improvement)"))

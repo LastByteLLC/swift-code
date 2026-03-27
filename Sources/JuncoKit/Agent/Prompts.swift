@@ -1,14 +1,18 @@
 // Prompts.swift — Ultra-compact prompt templates for each pipeline stage
 //
 // Every prompt is designed to fit within its stage's token budget.
-// No wasted tokens. No verbose instructions. The structured output
-// types (@Generable) do the heavy lifting of constraining the response.
+// Tool list is consistent across plan + execute stages.
+
+/// Central tool description used in both plan and execute prompts.
+private let toolList = """
+  bash (run shell command), read (read file), write (create/overwrite file), \
+  edit (find-replace in file), patch (apply unified diff), search (grep pattern)
+  """
 
 /// Prompt templates for each pipeline stage.
-/// All templates use string interpolation for dynamic content.
 public enum Prompts {
 
-  // MARK: - Classify (~800 tokens total)
+  // MARK: - Classify
 
   public static let classifySystem = """
     You classify coding tasks. Respond with the structured fields only.
@@ -21,7 +25,7 @@ public enum Prompts {
     """
   }
 
-  // MARK: - Strategy (~800 tokens total)
+  // MARK: - Strategy
 
   public static let strategySystem = """
     You choose a coding strategy. Pick the best approach for the task.
@@ -35,12 +39,11 @@ public enum Prompts {
     """
   }
 
-  // MARK: - Plan (~1500 tokens total)
+  // MARK: - Plan
 
   public static let planSystem = """
     You plan coding tasks as ordered steps. Each step uses exactly one tool. \
-    Tools: bash (run commands), read (read file), write (create/overwrite file), \
-    edit (find-replace in file), search (grep for pattern). \
+    Tools: \(toolList). \
     IMPORTANT: Only plan actions the user explicitly asked for. \
     If the user asks to read or explain, do NOT plan edits or writes. \
     If the user asks to fix or add, plan read first, then edit/write. Be minimal.
@@ -62,14 +65,12 @@ public enum Prompts {
     """
   }
 
-  // MARK: - Execute (~2500 tokens total)
+  // MARK: - Execute
 
-  /// Execute system prompt, with optional domain hint.
   public static func executeSystem(domainHint: String? = nil) -> String {
     var sys = """
       You are a coding agent. Execute the current step by choosing a tool. \
-      Tools: bash (shell command), read (file path), write (file path + content), \
-      edit (file path + find text + replacement), search (grep pattern). \
+      Tools: \(toolList). \
       Be precise. Output only the action.
       """
     if let hint = domainHint {
@@ -103,7 +104,7 @@ public enum Prompts {
     return prompt
   }
 
-  // MARK: - Observe (~1000 tokens total)
+  // MARK: - Observe
 
   public static let observeSystem = """
     Summarize this tool output concisely. Extract key facts relevant to the task.
@@ -122,7 +123,7 @@ public enum Prompts {
     """
   }
 
-  // MARK: - Reflect (~1000 tokens total)
+  // MARK: - Reflect
 
   public static let reflectSystem = """
     Reflect on the completed task. What worked? What would you do differently?

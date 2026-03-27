@@ -20,9 +20,11 @@ public actor Orchestrator {
   private let permissionService: PermissionService
   private let patchApplier: PatchApplier
   private let fileWatcher: FileWatcher
+  private let lspClient: LSPClient
   private let workingDirectory: String
   public let domain: DomainConfig
   private let intentClassifier: IntentClassifier
+  private var lspStarted = false
 
   private var projectIndex: [IndexEntry] = []
   private var needsReindex = true
@@ -54,19 +56,29 @@ public actor Orchestrator {
     self.domain = DomainDetector(workingDirectory: workingDirectory).detect()
     self.intentClassifier = IntentClassifier()
     self.fileWatcher = FileWatcher(directory: workingDirectory)
+    self.lspClient = LSPClient(workingDirectory: workingDirectory)
     self.metrics = SessionMetrics()
   }
 
   /// Start background file watching. Call once after init.
   public func startFileWatcher() async {
-    await fileWatcher.start { [weak self] in
-      Task { await self?.markNeedsReindex() }
+    // Use a Sendable flag box to communicate across actor boundary
+    let reindexFlag = ReindexFlag()
+    await fileWatcher.start {
+      reindexFlag.set()
     }
+    // Poll the flag before each run via checkFileWatcher()
+    self.reindexFlag = reindexFlag
   }
 
-  private func markNeedsReindex() {
-    needsReindex = true
-    debug("FileWatcher: changes detected, will reindex on next run")
+  private var reindexFlag: ReindexFlag?
+
+  /// Check if the file watcher detected changes. Called at start of run().
+  private func checkFileWatcher() {
+    if let flag = reindexFlag, flag.consume() {
+      needsReindex = true
+      debug("FileWatcher: changes detected, reindexing")
+    }
   }
 
   // MARK: - Public API
@@ -104,6 +116,9 @@ public actor Orchestrator {
       explicitContext += urlCtx + "\n"
       debug("URL context: \(TokenBudget.estimate(urlCtx)) tokens")
     }
+
+    // Check if file watcher detected external changes
+    checkFileWatcher()
 
     // Build or refresh project index
     if needsReindex || projectIndex.isEmpty {
@@ -193,12 +208,35 @@ public actor Orchestrator {
       }
     }
 
-    // Build verification after modifications
+    // Build verification + LSP diagnostics after modifications
     if filesWereModified {
+      // Start LSP lazily on first edit (only for Swift projects)
+      if domain.kind == .swift && !lspStarted {
+        lspStarted = await lspClient.start()
+        if lspStarted { debug("LSP: sourcekit-lsp started") }
+      }
+
       let buildResult = await buildRunner.verify()
       if !buildResult.isEmpty {
         lastBuildResult = buildResult
         debug("BUILD → \(buildResult)")
+
+        // Feed build errors back into memory for reflection
+        if buildResult.contains("FAIL") {
+          memory.addError("Build failed: \(String(buildResult.prefix(200)))")
+        }
+      }
+
+      // LSP diagnostics for modified Swift files
+      if lspStarted {
+        for file in memory.touchedFiles where file.hasSuffix(".swift") {
+          let diags = await lspClient.diagnostics(file: file)
+          for diag in diags {
+            let msg = "[\(diag.severity)] \(file):\(diag.line): \(diag.message)"
+            memory.addError(msg)
+            debug("LSP → \(msg)")
+          }
+        }
       }
     }
 
@@ -561,6 +599,15 @@ public struct RunResult: Sendable {
 public enum OrchestratorError: Error, Sendable {
   case editFailed(String)
   case toolFailed(String)
+}
+
+/// Thread-safe flag for cross-actor communication (FileWatcher → Orchestrator).
+public final class ReindexFlag: @unchecked Sendable {
+  private let lock = NSLock()
+  private var value = false
+
+  func set() { lock.withLock { value = true } }
+  func consume() -> Bool { lock.withLock { let v = value; value = false; return v } }
 }
 
 public struct SessionMetrics: Sendable {

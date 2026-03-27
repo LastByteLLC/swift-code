@@ -37,7 +37,7 @@ struct Junco: AsyncParsableCommand {
     let session = SessionManager(workingDirectory: cwd)
     let history = CommandHistory()
     let persistence = SessionPersistence(workingDirectory: cwd)
-    let notifications = NotificationService()
+    let notifications = NotificationService(workingDirectory: cwd)
     let markdown = MarkdownRenderer()
     let diffRenderer = DiffRenderer()
     let phrases = ThinkingPhrases(projectDirectory: cwd)

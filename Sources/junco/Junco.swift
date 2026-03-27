@@ -50,12 +50,35 @@ struct Junco: AsyncParsableCommand {
     Terminal.line(Style.dim("Type /help for commands, exit to quit"))
     Terminal.divider()
 
+    // Set up interactive line editor (falls back to plain readLine if not a TTY)
+    let driver = TerminalDriver()
+    let promptStr = Style.cyan("junco") + Style.dim("> ")
+    let editor: LineEditor? = driver.map { _ in
+      LineEditor(
+        prompt: promptStr,
+        completers: [
+          CommandCompleter(),
+          FileCompleter(workingDirectory: cwd),
+        ]
+      )
+    }
+
     while true {
-      print(Style.cyan("junco") + Style.dim("> "), terminator: "")
-      fflush(stdout)
-      guard let line = readLine() else { break }
-      guard !line.isEmpty else { continue }
-      let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
+      let line: String?
+      if let editor, let driver {
+        // Raw mode ON for interactive input (completions, arrow keys)
+        driver.enableRawMode()
+        line = editor.readLine(driver: driver)
+        // Raw mode OFF for agent execution (needs normal stdout)
+        driver.restoreMode()
+      } else {
+        print(promptStr, terminator: "")
+        fflush(stdout)
+        line = Swift.readLine()
+      }
+      guard let input = line else { break }
+      let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { continue }
 
       if trimmed.lowercased() == "exit" || trimmed.lowercased() == "quit" {
         await printSessionSummary(orchestrator: orchestrator, session: session, sessionStart: sessionStart)

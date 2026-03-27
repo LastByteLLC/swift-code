@@ -65,6 +65,9 @@ struct Junco: AsyncParsableCommand {
 
     // Welcome message
     let domain = await orchestrator.domain
+    // Take over the terminal — alternate screen buffer
+    Terminal.enterFullScreen()
+
     let gitBranch = await session.gitContext()
     let fileCount = FileTools(workingDirectory: cwd).listFiles().count
     let reflectionCount = ReflectionStore(projectDirectory: cwd).count
@@ -85,7 +88,8 @@ struct Junco: AsyncParsableCommand {
       workingDirectory: cwd, domain: domain.kind.rawValue
     )
 
-    // Start background services (async, non-blocking)
+    // Start background services and install signal handlers
+    installSignalHandlers()
     Task {
       await notifications.requestAuthorization()
       await orchestrator.startFileWatcher()
@@ -112,7 +116,10 @@ struct Junco: AsyncParsableCommand {
         fflush(stdout)
         line = Swift.readLine()
       }
-      guard let input = line else { break }
+      guard let input = line else {
+        Terminal.leaveFullScreen()
+        break
+      }
       let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
       guard !trimmed.isEmpty else { continue }
 
@@ -121,6 +128,7 @@ struct Junco: AsyncParsableCommand {
 
       if trimmed.lowercased() == "exit" || trimmed.lowercased() == "quit" {
         await printSessionSummary(orchestrator: orchestrator, sessionStart: sessionStart)
+        Terminal.leaveFullScreen()
         break
       }
 
@@ -170,19 +178,72 @@ struct Junco: AsyncParsableCommand {
     phrases: ThinkingPhrases = ThinkingPhrases()
   ) async throws {
     let taskStart = Date()
-    Terminal.status(phrases.status(stage: "classify", tick: 0))
+    let progress = ProgressBar(phrases: phrases)
+    let streamFlag = ReindexFlag()  // Reuse as generic atomic bool
+
+    // Build pipeline callbacks
+    let callbacks = PipelineCallbacks(
+      onProgress: { step, total, description in
+        let status = progress.render(step: step, total: total, tool: "", target: description)
+        Terminal.status(status)
+      },
+      onStepError: { step, error in
+        Terminal.clearLine()
+        Terminal.line(Style.red("  Step \(step) failed: \(error)"))
+        if Terminal.isInteractive {
+          print("  [\(Style.cyan("r"))]etry / [\(Style.cyan("s"))]kip / [\(Style.cyan("a"))]bort? ", terminator: "")
+          fflush(stdout)
+          guard let choice = Swift.readLine()?.lowercased().first else { return .skip }
+          switch choice {
+          case "r": return .retry
+          case "a": return .abort
+          default:  return .skip
+          }
+        }
+        return .skip  // Non-interactive: auto-skip
+      },
+      onStream: { [streamFlag] chunk in
+        if !streamFlag.consume() {
+          // First chunk hasn't been flagged yet — this IS the first chunk
+        }
+        streamFlag.set()
+        Terminal.clearLine()
+        print(chunk, terminator: "")
+        fflush(stdout)
+      }
+    )
+
+    Terminal.status(progress.renderStage("classify"))
 
     do {
       let result = try await orchestrator.run(
         query: query,
         referencedFiles: referencedFiles,
-        urlContext: urlContext
+        urlContext: urlContext,
+        callbacks: callbacks
       )
       Terminal.clearLine()
-      await printResult(result, markdown: markdown, diffRenderer: diffRenderer, orchestrator: orchestrator)
+
+      // If output was streamed, just add a newline; otherwise render normally
+      if result.wasStreamed && streamFlag.consume() {
+        print()  // Newline after streamed content
+        // Show toast for metadata
+        let elapsed = Date().timeIntervalSince(taskStart)
+        Toast.timing(
+          "\(result.memory.llmCalls) calls | ~\(result.memory.totalTokensUsed) tokens",
+          seconds: elapsed
+        )
+      } else {
+        await printResult(result, markdown: markdown, diffRenderer: diffRenderer, orchestrator: orchestrator)
+      }
+
+      // Build result toast
+      if let buildResult = await orchestrator.lastBuildResult {
+        Toast.buildResult(buildResult)
+      }
 
       // Persist turn
-      let turn = PersistedTurn(
+      persistence.addTurn(PersistedTurn(
         query: query,
         taskType: result.memory.intent?.taskType ?? "unknown",
         response: String(result.reflection.insight.prefix(200)),
@@ -190,8 +251,7 @@ struct Junco: AsyncParsableCommand {
         llmCalls: result.memory.llmCalls,
         tokens: result.memory.totalTokensUsed,
         filesModified: Array(result.memory.touchedFiles)
-      )
-      persistence.addTurn(turn, to: &persistedSession)
+      ), to: &persistedSession)
 
       await session.recordTurn(TurnSummary(
         query: query,
@@ -200,12 +260,11 @@ struct Junco: AsyncParsableCommand {
         filesModified: Array(result.memory.touchedFiles)
       ))
 
-      // Notify if slow
       await notifications.notifyIfSlow(taskStart: taskStart, query: query)
 
     } catch {
       Terminal.clearLine()
-      Terminal.line(Style.red("[error] \(error)"))
+      Toast.show("\(error)", level: .error)
 
       await session.recordTurn(TurnSummary(
         query: query, taskType: "error",

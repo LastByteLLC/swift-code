@@ -31,6 +31,37 @@ public enum Terminal {
     isatty(STDOUT_FILENO) != 0
   }
 
+  /// Whether we're currently in alternate screen mode.
+  nonisolated(unsafe) private static var inAlternateScreen = false
+
+  /// Enter the alternate screen buffer and clear it.
+  /// The user's existing terminal content is preserved underneath.
+  /// Call `leaveFullScreen()` on exit to restore it.
+  public static func enterFullScreen() {
+    guard isInteractive else { return }
+    print("\u{1B}[?1049h", terminator: "")  // Switch to alternate buffer
+    print("\u{1B}[2J", terminator: "")       // Clear screen
+    print("\u{1B}[H", terminator: "")        // Cursor to top-left
+    fflush(stdout)
+    inAlternateScreen = true
+
+    // Register atexit handler so we restore even on unexpected exit
+    atexit {
+      if Terminal.inAlternateScreen {
+        print("\u{1B}[?1049l", terminator: "")
+        fflush(stdout)
+      }
+    }
+  }
+
+  /// Leave the alternate screen buffer, restoring the original terminal content.
+  public static func leaveFullScreen() {
+    guard isInteractive, inAlternateScreen else { return }
+    print("\u{1B}[?1049l", terminator: "")
+    fflush(stdout)
+    inAlternateScreen = false
+  }
+
   /// Clear the current line and move cursor to start.
   public static func clearLine() {
     if isInteractive {

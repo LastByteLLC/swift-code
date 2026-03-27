@@ -86,7 +86,8 @@ public actor Orchestrator {
   public func run(
     query: String,
     referencedFiles: [String] = [],
-    urlContext: String? = nil
+    urlContext: String? = nil,
+    callbacks: PipelineCallbacks = .none
   ) async throws -> RunResult {
     var memory = WorkingMemory(query: query)
     lastDiffs = []
@@ -94,13 +95,10 @@ public actor Orchestrator {
 
     // Conversational short-circuit
     if let directResponse = handleConversational(query) {
-      return RunResult(
-        memory: memory,
-        reflection: AgentReflection(
-          taskSummary: "Conversational query", insight: directResponse,
-          improvement: "", succeeded: true
-        )
-      )
+      return RunResult(memory: memory, reflection: AgentReflection(
+        taskSummary: "Conversational query", insight: directResponse,
+        improvement: "", succeeded: true
+      ))
     }
 
     // Pre-read @-referenced files
@@ -133,15 +131,23 @@ public actor Orchestrator {
     memory.intent = intent
     debug("CLASSIFY → domain:\(intent.domain) type:\(intent.taskType) complexity:\(intent.complexity) targets:\(intent.targets)")
 
-    // Explain/explore shortcut with @-files
+    // Explain/explore shortcut with @-files — supports streaming
     if (intent.taskType == "explain" || intent.taskType == "explore") && !explicitContext.isEmpty {
       debug("SHORTCUT: explain/explore with @-referenced files, skipping plan")
       let explainPrompt = "Task: \(query)\n\nContent:\n\(TokenBudget.truncate(explicitContext, toTokens: 2500))"
+      let systemPrompt = "You are a coding assistant. Explain the provided code or documentation clearly and concisely. \(domain.promptHint)"
       memory.trackCall(estimatedTokens: TokenBudget.execute.total)
-      let response = try await adapter.generate(
-        prompt: explainPrompt,
-        system: "You are a coding assistant. Explain the provided code or documentation clearly and concisely. \(domain.promptHint)"
-      )
+
+      let response: String
+      if let onStream = callbacks.onStream {
+        // Stream output chunk by chunk for real-time display
+        response = try await adapter.generateStreaming(
+          prompt: explainPrompt, system: systemPrompt, onChunk: onStream
+        )
+      } else {
+        response = try await adapter.generate(prompt: explainPrompt, system: systemPrompt)
+      }
+
       let reflection = AgentReflection(
         taskSummary: "Explained \(referencedFiles.joined(separator: ", "))",
         insight: response, improvement: "", succeeded: true
@@ -151,7 +157,7 @@ public actor Orchestrator {
       metrics.tasksCompleted += 1
       metrics.totalTokensUsed += memory.totalTokensUsed
       metrics.totalLLMCalls += memory.llmCalls
-      return RunResult(memory: memory, reflection: reflection)
+      return RunResult(memory: memory, reflection: reflection, wasStreamed: true)
     }
 
     let strategy = try await discoverStrategy(query: query, intent: intent, memory: &memory)
@@ -174,13 +180,18 @@ public actor Orchestrator {
       debug("  [\(i + 1)] \(step.tool): \(step.instruction) → \(step.target)")
     }
 
-    // Execute with loop detection
+    // Execute with progress callbacks, error recovery, and loop detection
     var lastActions: [(tool: String, target: String)] = []
     var filesWereModified = false
+    let totalSteps = cappedSteps.count
 
     for (index, step) in cappedSteps.enumerated() {
       memory.currentStepIndex = index
 
+      // Progress callback
+      await callbacks.onProgress?(index + 1, totalSteps, step.instruction)
+
+      // Loop detection
       if lastActions.count >= 2 {
         let prev = lastActions.suffix(2)
         if prev.allSatisfy({ $0.tool == step.tool && $0.target == step.target }) {
@@ -190,21 +201,70 @@ public actor Orchestrator {
         }
       }
 
-      do {
-        let observation = try await executeStep(step: step, memory: &memory)
-        memory.addObservation(observation)
-        lastActions.append((tool: observation.tool, target: step.target))
-        if observation.tool == "write" || observation.tool == "edit" {
-          filesWereModified = true
+      // Execute with retry support
+      var attempt = 0
+      let maxRetries = 2
+
+      while true {
+        do {
+          let observation = try await executeStep(step: step, memory: &memory)
+          memory.addObservation(observation)
+          lastActions.append((tool: observation.tool, target: step.target))
+          if ["write", "edit", "patch"].contains(observation.tool) {
+            filesWereModified = true
+          }
+          debug("EXEC[\(index + 1)] → [\(observation.outcome)] \(observation.tool): \(observation.keyFact)")
+
+          // Check if the step itself reported an error in output
+          if observation.outcome == "error", let handler = callbacks.onStepError, attempt < maxRetries {
+            let recovery = await handler(index + 1, observation.keyFact)
+            switch recovery {
+            case .retry:
+              attempt += 1
+              debug("RETRY step \(index + 1), attempt \(attempt)")
+              continue
+            case .abort:
+              debug("ABORT at step \(index + 1)")
+              memory.addError("Aborted by user at step \(index + 1)")
+              break
+            case .skip:
+              break
+            }
+          }
+          break  // Move to next step
+
+        } catch {
+          memory.addError("Step \(index + 1): \(error)")
+          memory.addObservation(StepObservation(
+            tool: step.tool, outcome: "error", keyFact: "\(error)"
+          ))
+          lastActions.append((tool: step.tool, target: step.target))
+          debug("EXEC[\(index + 1)] → [ERROR] \(error)")
+
+          // Error recovery callback
+          if let handler = callbacks.onStepError, attempt < maxRetries {
+            let recovery = await handler(index + 1, "\(error)")
+            switch recovery {
+            case .retry:
+              attempt += 1
+              debug("RETRY step \(index + 1), attempt \(attempt)")
+              continue
+            case .abort:
+              debug("ABORT at step \(index + 1)")
+              memory.addError("Aborted by user at step \(index + 1)")
+              // Use a labeled break to exit both while and for
+              break
+            case .skip:
+              break
+            }
+          }
+          break  // Move to next step
         }
-        debug("EXEC[\(index + 1)] → [\(observation.outcome)] \(observation.tool): \(observation.keyFact)")
-      } catch {
-        memory.addError("Step \(index + 1): \(error)")
-        memory.addObservation(StepObservation(
-          tool: step.tool, outcome: "error", keyFact: "\(error)"
-        ))
-        lastActions.append((tool: step.tool, target: step.target))
-        debug("EXEC[\(index + 1)] → [ERROR] \(error)")
+      }
+
+      // Check if we should abort the whole pipeline
+      if memory.errors.last?.contains("Aborted") == true {
+        break
       }
     }
 
@@ -594,6 +654,14 @@ public actor Orchestrator {
 public struct RunResult: Sendable {
   public let memory: WorkingMemory
   public let reflection: AgentReflection
+  /// True if the response was already streamed to the user via callbacks.
+  public let wasStreamed: Bool
+
+  public init(memory: WorkingMemory, reflection: AgentReflection, wasStreamed: Bool = false) {
+    self.memory = memory
+    self.reflection = reflection
+    self.wasStreamed = wasStreamed
+  }
 }
 
 public enum OrchestratorError: Error, Sendable {
@@ -602,12 +670,15 @@ public enum OrchestratorError: Error, Sendable {
 }
 
 /// Thread-safe flag for cross-actor communication (FileWatcher → Orchestrator).
+/// Thread-safe atomic boolean flag. Used for cross-boundary signaling.
 public final class ReindexFlag: @unchecked Sendable {
   private let lock = NSLock()
   private var value = false
 
-  func set() { lock.withLock { value = true } }
-  func consume() -> Bool { lock.withLock { let v = value; value = false; return v } }
+  public init() {}
+
+  public func set() { lock.withLock { value = true } }
+  public func consume() -> Bool { lock.withLock { let v = value; value = false; return v } }
 }
 
 public struct SessionMetrics: Sendable {

@@ -28,6 +28,41 @@ public actor AFMAdapter: LLMAdapter {
     }
   }
 
+  // MARK: - Streaming text generation
+
+  /// Generate text with streaming — calls handler with each partial update.
+  /// Returns the complete final text.
+  public func generateStreaming(
+    prompt: String,
+    system: String?,
+    onChunk: @escaping @Sendable (String) async -> Void
+  ) async throws -> String {
+    let model = SystemLanguageModel.default
+    let session: LanguageModelSession
+    if let system {
+      session = LanguageModelSession(model: model, instructions: system)
+    } else {
+      session = LanguageModelSession(model: model)
+    }
+
+    do {
+      var fullText = ""
+      let stream = session.streamResponse(to: prompt)
+      for try await partial in stream {
+        let newContent = partial.content
+        // Only send the delta (new characters since last chunk)
+        if newContent.count > fullText.count {
+          let delta = String(newContent.dropFirst(fullText.count))
+          await onChunk(delta)
+        }
+        fullText = newContent
+      }
+      return fullText
+    } catch let error as LanguageModelSession.GenerationError {
+      throw LLMError.from(error)
+    }
+  }
+
   // MARK: - Structured generation (AFM-specific)
 
   /// Generate structured output constrained by a @Generable type.

@@ -116,11 +116,18 @@ public struct LineEditor: Sendable {
     var completions: [Completion] = []
     var sel = -1
     var historyNav = history.map { HistoryNavigator(history: $0) }
+    var prevLines = 1  // tracks how many terminal rows our content spans
+    var escPending = false  // true after first Esc press
 
-    render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel)
+    render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
 
     while true {
       let key = driver.readKey()
+
+      // Any key other than Esc cancels the "Esc again to clear" state
+      if key != .escape && escPending {
+        escPending = false
+      }
 
       switch key {
       // --- Text editing ---
@@ -158,22 +165,22 @@ public struct LineEditor: Sendable {
       // --- Cursor movement ---
       case .left:
         if cur > 0 { cur -= 1 }
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
         continue
 
       case .right:
         if cur < buf.count { cur += 1 }
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
         continue
 
       case .home:
         cur = 0
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
         continue
 
       case .end:
         cur = buf.count
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
         continue
 
       // --- Up/Down: completions take priority, then history ---
@@ -211,6 +218,14 @@ public struct LineEditor: Sendable {
       case .escape:
         completions = []
         sel = -1
+        if escPending {
+          // Second Esc: clear input
+          buf.removeAll()
+          cur = 0
+          escPending = false
+        } else if !buf.isEmpty {
+          escPending = true
+        }
 
       // --- Multi-line (Alt+Enter or Shift+Enter) ---
       case .shiftEnter:
@@ -226,19 +241,19 @@ public struct LineEditor: Sendable {
           completions = []
           sel = -1
         } else {
-          finalRender(driver: driver, buffer: buf)
+          finalRender(driver: driver, buffer: buf, prevLines: prevLines)
           historyNav?.reset()
           return buf.isEmpty ? nil : String(buf)
         }
 
       // --- Cancel ---
       case .ctrlC:
-        finalRender(driver: driver, buffer: buf)
+        finalRender(driver: driver, buffer: buf, prevLines: prevLines)
         return nil
 
       case .ctrlD:
         if buf.isEmpty {
-          finalRender(driver: driver, buffer: buf)
+          finalRender(driver: driver, buffer: buf, prevLines: prevLines)
           return nil
         }
 
@@ -249,25 +264,82 @@ public struct LineEditor: Sendable {
         continue
       }
 
-      render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel)
+      render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
     }
   }
 
   // MARK: - Rendering
+
+  /// Calculate row and column position at a given character offset in the buffer,
+  /// accounting for explicit newlines and terminal width wrapping.
+  private func cursorPosition(
+    in buffer: [Character], at offset: Int, promptWidth: Int, screenWidth: Int
+  ) -> (row: Int, col: Int) {
+    var row = 0
+    var col = promptWidth  // prompt occupies the first line
+    for i in 0..<min(offset, buffer.count) {
+      if buffer[i] == "\n" {
+        row += 1
+        col = 0
+      } else {
+        col += 1
+        if col >= screenWidth {
+          row += 1
+          col = 0
+        }
+      }
+    }
+    return (row, col)
+  }
+
+  /// Total number of terminal rows the prompt + buffer occupies.
+  private func totalRows(
+    buffer: [Character], promptWidth: Int, screenWidth: Int, extraSuffix: Int = 0
+  ) -> Int {
+    let (row, col) = cursorPosition(
+      in: buffer, at: buffer.count, promptWidth: promptWidth, screenWidth: screenWidth
+    )
+    let lastLineLen = col + extraSuffix
+    return row + max(1, (lastLineLen + screenWidth - 1) / screenWidth)
+  }
 
   private func render(
     driver: any TerminalIO,
     buffer: [Character],
     cursor: Int,
     completions: [Completion],
-    selected: Int
+    selected: Int,
+    prevLines: inout Int,
+    escHint: Bool = false
   ) {
-    let text = String(buffer)
+    let width = max(driver.screenWidth, 20)
+    let escSuffix = escHint ? "  " + TerminalDriver.dim("Esc again to clear") : ""
+    let escVisibleLen = escHint ? 20 : 0
 
-    driver.beginRedraw()
+    // How many rows the content will occupy
+    let contentLines = totalRows(
+      buffer: buffer, promptWidth: promptWidth, screenWidth: width, extraSuffix: escVisibleLen
+    )
+
+    // Move to the start of our content
+    if prevLines > 1 {
+      driver.moveUp(prevLines - 1)
+    }
+    driver.write("\r")
+    driver.clearToEndOfScreen()
+
+    // Write prompt + buffer line by line (handle \n explicitly)
     driver.write(prompt)
-    driver.write(text)
+    for ch in buffer {
+      if ch == "\n" {
+        driver.newline()
+      } else {
+        driver.write(String(ch))
+      }
+    }
+    driver.write(escSuffix)
 
+    // Completions dropdown
     if !completions.isEmpty {
       for (i, c) in completions.enumerated() {
         driver.newline()
@@ -280,14 +352,32 @@ public struct LineEditor: Sendable {
       driver.moveUp(completions.count)
     }
 
-    driver.moveTo(column: promptWidth + cursor + 1)
+    // Position cursor at the correct row+col
+    let curPos = cursorPosition(in: buffer, at: cursor, promptWidth: promptWidth, screenWidth: width)
+    let endPos = cursorPosition(in: buffer, at: buffer.count, promptWidth: promptWidth, screenWidth: width)
+
+    let rowsUp = endPos.row - curPos.row
+    if rowsUp > 0 { driver.moveUp(rowsUp) }
+    driver.moveTo(column: curPos.col + 1)
     driver.flush()
+
+    prevLines = contentLines + completions.count
   }
 
-  private func finalRender(driver: any TerminalIO, buffer: [Character]) {
-    driver.beginRedraw()
+  private func finalRender(driver: any TerminalIO, buffer: [Character], prevLines: Int) {
+    if prevLines > 1 {
+      driver.moveUp(prevLines - 1)
+    }
+    driver.write("\r")
+    driver.clearToEndOfScreen()
     driver.write(prompt)
-    driver.write(String(buffer))
+    for ch in buffer {
+      if ch == "\n" {
+        driver.newline()
+      } else {
+        driver.write(String(ch))
+      }
+    }
     driver.newline()
     driver.flush()
   }

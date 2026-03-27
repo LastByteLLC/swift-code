@@ -33,6 +33,8 @@ public protocol TerminalIO: AnyObject {
   func write(_ text: String)
   func flush()
   func beginRedraw()
+  func clearToEndOfScreen()
+  func clearLine()
   func moveTo(column: Int)
   func moveUp(_ n: Int)
   func moveDown(_ n: Int)

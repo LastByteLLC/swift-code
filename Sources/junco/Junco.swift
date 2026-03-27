@@ -132,9 +132,9 @@ struct Junco: AsyncParsableCommand {
     }
 
     while true {
-      // Draw prompt border
+      // Draw prompt border (full width, thicker line)
       let width = Terminal.terminalWidth()
-      let topBorder = Style.dim(String(repeating: "─", count: min(width, 60)))
+      let topBorder = Style.dim(String(repeating: "━", count: width))
       Terminal.line(topBorder)
 
       let line: String?
@@ -148,8 +148,8 @@ struct Junco: AsyncParsableCommand {
         line = Swift.readLine()
       }
 
-      // Bottom border after input
-      let bottomBorder = Style.dim(String(repeating: "─", count: min(width, 60)))
+      // Bottom border after input (full width, thicker line)
+      let bottomBorder = Style.dim(String(repeating: "━", count: width))
       Terminal.line(bottomBorder)
       guard let input = line else {
         break

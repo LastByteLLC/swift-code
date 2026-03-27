@@ -79,4 +79,59 @@ struct OrchestratorTests {
     let metrics = await orch.metrics
     #expect(metrics.tasksCompleted == 0)
   }
+
+  // MARK: - URL Extraction
+
+  @Test("extractURLs finds HTTP URLs in text")
+  func extractHTTPURLs() {
+    let urls = Orchestrator.extractURLs(
+      "Fetch from https://itunes.apple.com/search?term=hello and display results"
+    )
+    #expect(urls.count == 1)
+    #expect(urls.first?.contains("itunes.apple.com") == true)
+  }
+
+  @Test("extractURLs returns empty for text without URLs")
+  func extractNoURLs() {
+    let urls = Orchestrator.extractURLs("Create a file called app.js with a greeting function")
+    #expect(urls.isEmpty)
+  }
+
+  @Test("extractURLs finds multiple URLs")
+  func extractMultipleURLs() {
+    let urls = Orchestrator.extractURLs(
+      "Use https://api.example.com/data and https://cdn.example.com/style.css"
+    )
+    #expect(urls.count == 2)
+  }
+
+  // MARK: - Content Verification
+
+  @Test("verifyContent catches missing quoted content")
+  func verifyMissing() {
+    let result = Orchestrator.verifyContent(
+      content: "<title>My Web Page</title>",
+      query: "Create index.html with title \"PodcastApp\""
+    )
+    #expect(result != nil)
+    #expect(result?.contains("PodcastApp") == true)
+  }
+
+  @Test("verifyContent passes when content matches")
+  func verifyPresent() {
+    let result = Orchestrator.verifyContent(
+      content: "<title>PodcastApp</title>",
+      query: "Create index.html with title \"PodcastApp\""
+    )
+    #expect(result == nil)
+  }
+
+  @Test("verifyContent handles no quoted strings")
+  func verifyNoQuotes() {
+    let result = Orchestrator.verifyContent(
+      content: "anything",
+      query: "Create a simple file"
+    )
+    #expect(result == nil)
+  }
 }

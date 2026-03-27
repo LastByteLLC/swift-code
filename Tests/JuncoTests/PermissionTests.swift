@@ -71,6 +71,22 @@ struct PermissionTests {
     #expect(text.contains("42 chars"))
   }
 
+  @Test("isAllowed rejects substring matches (security fix)")
+  func substringRejection() {
+    let dir = makeTempDir()
+    defer { try? FileManager.default.removeItem(atPath: dir) }
+    let svc = PermissionService(workingDirectory: dir)
+    svc.saveAlwaysAllow(tool: "write", target: "config.json")
+    // Should NOT allow writing to config.json.evil (substring match)
+    #expect(!svc.isAllowed(tool: "write", target: "config.json.evil"))
+    // Should NOT allow config.json-backup either
+    #expect(!svc.isAllowed(tool: "write", target: "config.json-backup"))
+    // Should still allow exact match
+    #expect(svc.isAllowed(tool: "write", target: "config.json"))
+    // Should allow path suffix match
+    #expect(svc.isAllowed(tool: "write", target: "src/config.json"))
+  }
+
   // MARK: - PipelineCallbacks permission branching
 
   @Test("callback allow branch")

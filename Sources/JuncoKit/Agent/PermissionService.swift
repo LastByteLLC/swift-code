@@ -22,7 +22,13 @@ public struct PermissionService: Sendable {
   /// Returns true if there's a matching always-allow rule.
   public func isAllowed(tool: String, target: String) -> Bool {
     let rules = loadRules()
-    return rules.contains { $0.tool == tool && (target.contains($0.pattern) || $0.pattern == "*") }
+    return rules.contains { rule in
+      rule.tool == tool && (
+        rule.pattern == "*" ||
+        target == rule.pattern ||
+        target.hasSuffix("/\(rule.pattern)")
+      )
+    }
   }
 
   /// Save an always-allow rule.

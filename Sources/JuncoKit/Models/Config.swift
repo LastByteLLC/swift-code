@@ -35,6 +35,12 @@ public enum Config {
   /// Default bash command timeout in seconds.
   public static let bashTimeout: TimeInterval = 30
 
+  /// Maximum retries when code validation (JSC/Swift) fails.
+  public static let maxValidationRetries = 2
+
+  /// Whether to sandbox bash commands via sandbox-exec.
+  public static let sandboxEnabled = true
+
   /// Maximum tokens for tool output before truncation.
   public static let toolOutputMaxTokens = 400
 

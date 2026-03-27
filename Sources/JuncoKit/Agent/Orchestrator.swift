@@ -12,6 +12,7 @@ public actor Orchestrator {
   private let shell: SafeShell
   private let files: FileTools
   private let jsValidator: JSCValidator
+  private let swiftValidator: SwiftValidator
   private let contextPacker: ContextPacker
   private let reflectionStore: ReflectionStore
   private let skillLoader: SkillLoader
@@ -44,6 +45,7 @@ public actor Orchestrator {
     self.workingDirectory = workingDirectory
     self.shell = SafeShell(workingDirectory: workingDirectory)
     self.jsValidator = JSCValidator()
+    self.swiftValidator = SwiftValidator()
     self.files = FileTools(workingDirectory: workingDirectory)
     self.contextPacker = ContextPacker(workingDirectory: workingDirectory)
     self.reflectionStore = ReflectionStore(projectDirectory: workingDirectory)
@@ -164,6 +166,105 @@ public actor Orchestrator {
       return RunResult(memory: memory, reflection: reflection, wasStreamed: true)
     }
 
+    // Fast path: simple file creation — bypass strategy/plan/execute
+    // Direct-AFM testing showed 90% quality from a single well-crafted prompt
+    // vs 11% through the full pipeline. For simple creates, 1 call is better than 10.
+    if intent.taskType == "add" && intent.complexity == "simple" {
+      let newTargets = intent.targets.filter { !files.exists($0) }
+      if !newTargets.isEmpty && newTargets.count <= 2 && explicitContext.isEmpty {
+        debug("FAST PATH: simple create for \(newTargets)")
+
+        let urls = Self.extractURLs(query)
+        let urlHint = urls.isEmpty ? "" : "\nIMPORTANT: Use these exact URLs in the code (do not substitute): \(urls.joined(separator: ", "))"
+
+        for target in newTargets {
+          let prompt = """
+            Create the file \(target).
+            User request: \(query)\(urlHint)
+            Project root: \(workingDirectory)
+            """
+          memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+
+          let params = try await adapter.generateStructured(
+            prompt: prompt,
+            system: "Generate the file path and complete content. Follow the user's request precisely. \(domain.promptHint)",
+            as: CreateParams.self
+          )
+          let path = target.isEmpty ? params.filePath : target
+          var content = params.content
+
+          // Validate with retry
+          var retries = 0
+          while retries < Config.maxValidationRetries {
+            let feedback = jsValidator.feedbackForLLM(code: content, filePath: path)
+              ?? swiftValidator.feedbackForLLM(code: content, filePath: path)
+            guard let error = feedback else { break }
+            retries += 1
+            debug("FAST PATH validation retry \(retries): \(error)")
+            memory.trackCall(estimatedTokens: 800)
+            let fixed = try await adapter.generateStructured(
+              prompt: "Fix this code.\nError: \(error)\n\nCode:\n\(content)",
+              system: "Fix the error. Return the complete corrected file.",
+              as: CreateParams.self
+            )
+            content = fixed.content
+          }
+
+          // Final validation
+          if let finalError = jsValidator.feedbackForLLM(code: content, filePath: path)
+              ?? swiftValidator.feedbackForLLM(code: content, filePath: path) {
+            memory.addObservation(StepObservation(tool: "create", outcome: "error", keyFact: finalError))
+            memory.addError(finalError)
+            continue
+          }
+
+          // Permission + write
+          let decision = await askPermission(tool: "create", target: path, detail: "\(content.count) chars")
+          guard decision != .deny else { continue }
+          memory.touch(path)
+          metrics.filesModified += 1
+          try files.write(path: path, content: content)
+          lastDiffs.append(diffPreview.diffWrite(filePath: path, existingContent: nil, newContent: content))
+          memory.addObservation(StepObservation(tool: "create", outcome: "ok", keyFact: "Created \(path) (\(content.count) chars)"))
+
+          // Post-write verification: check URLs were preserved
+          for url in urls {
+            if !content.contains(url) {
+              memory.addError("URL not found in output: \(url)")
+            }
+          }
+
+          // Post-write verification: check quoted requirements
+          if let missing = Self.verifyContent(content: content, query: query) {
+            debug("Content verification: \(missing)")
+          }
+        }
+
+        // Build verify
+        if metrics.filesModified > 0 {
+          let buildResult = await buildRunner.verify()
+          if !buildResult.isEmpty {
+            lastBuildResult = buildResult
+            if buildResult.contains("FAIL") {
+              memory.addError("Build failed: \(String(buildResult.prefix(200)))")
+            }
+          }
+        }
+
+        let reflection = AgentReflection(
+          taskSummary: "Created \(newTargets.joined(separator: ", "))",
+          insight: memory.didSucceed ? "Files created successfully." : "Some files could not be created.",
+          improvement: "", succeeded: memory.didSucceed
+        )
+        debug("FAST PATH → succeeded:\(reflection.succeeded)")
+        try? reflectionStore.save(query: query, reflection: reflection)
+        metrics.tasksCompleted += 1
+        metrics.totalTokensUsed += memory.totalTokensUsed
+        metrics.totalLLMCalls += memory.llmCalls
+        return RunResult(memory: memory, reflection: reflection)
+      }
+    }
+
     let strategy = try await discoverStrategy(query: query, intent: intent, memory: &memory)
     memory.strategy = strategy
     debug("STRATEGY → approach:\(strategy.approach) start:\(strategy.startingPoints) risk:\(strategy.risk)")
@@ -274,6 +375,15 @@ public actor Orchestrator {
       // Check if we should abort the whole pipeline
       if memory.errors.last?.contains("Aborted") == true {
         break
+      }
+
+      // Early termination: if step 1 create succeeded for a simple task, skip remaining
+      if intent.complexity == "simple" && index == 0 && cappedSteps.count > 1 {
+        if let lastObs = memory.observations.last,
+           lastObs.tool == "create" && lastObs.outcome == "ok" {
+          debug("EARLY EXIT: simple create succeeded on step 1, skipping \(cappedSteps.count - 1) remaining steps")
+          break
+        }
       }
     }
 
@@ -440,6 +550,18 @@ public actor Orchestrator {
     query: String, intent: AgentIntent, strategy: AgentStrategy,
     memory: inout WorkingMemory, explicitContext: String = ""
   ) async throws -> AgentPlan {
+    // Deterministic plan: single-file creation (skip LLM planning)
+    if intent.taskType == "add" && intent.complexity == "simple" {
+      let newTargets = intent.targets.filter { !files.exists($0) }
+      if !newTargets.isEmpty {
+        let steps = newTargets.map { target in
+          PlanStep(instruction: "Create \(target) as requested", tool: "create", target: target)
+        }
+        debug("DETERMINISTIC PLAN: \(steps.count) create step(s)")
+        return AgentPlan(steps: steps)
+      }
+    }
+
     let fileContext: String
     if !explicitContext.isEmpty {
       fileContext = TokenBudget.truncate(explicitContext, toTokens: TokenBudget.plan.context)
@@ -533,8 +655,10 @@ public actor Orchestrator {
       return .read(path: p.filePath)
 
     case "create":
+      let createURLs = Self.extractURLs(memory.query)
+      let createURLHint = createURLs.isEmpty ? "" : "\nIMPORTANT: Use these exact URLs (do not substitute): \(createURLs.joined(separator: ", "))"
       let p = try await adapter.generateStructured(
-        prompt: "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 150))",
+        prompt: "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 150))\(createURLHint)",
         system: "Generate file path and complete content for a new file. Follow the user's request precisely.",
         as: CreateParams.self
       )
@@ -542,8 +666,10 @@ public actor Orchestrator {
       return .create(path: path, content: p.content)
 
     case "write":
+      let writeURLs = Self.extractURLs(memory.query)
+      let writeURLHint = writeURLs.isEmpty ? "" : "\nIMPORTANT: Use these exact URLs (do not substitute): \(writeURLs.joined(separator: ", "))"
       let p = try await adapter.generateStructured(
-        prompt: "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 150))\n\nExisting:\n\(codeContext)",
+        prompt: "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 150))\(writeURLHint)\n\nExisting:\n\(codeContext)",
         system: "Generate file path and complete content to write. Follow the user's request precisely.",
         as: WriteParams.self
       )
@@ -635,7 +761,7 @@ public actor Orchestrator {
       memory.touch(path)
       return try files.read(path: path, maxTokens: Config.fileReadMaxTokens)
 
-    case .create(let path, let content):
+    case .create(let path, var content):
       // Fail if file already exists — use edit for existing files
       if files.exists(path) {
         return "ERROR: File already exists: \(path). Use edit to modify existing files."
@@ -643,29 +769,67 @@ public actor Orchestrator {
       let createDecision = await askPermission(tool: "create", target: path, detail: "\(content.count) chars")
       guard createDecision != .deny else { return "DENIED: create \(path)" }
 
-      // JSC validation for JavaScript files
-      if let feedback = jsValidator.feedbackForLLM(code: content, filePath: path) {
-        debug("JSC validation failed for \(path): \(feedback)")
-        return "VALIDATION FAILED: \(feedback)"
+      // Syntax validation with retry (JS via JSC, Swift via swiftc -parse)
+      var retries = 0
+      while retries < Config.maxValidationRetries {
+        let feedback = jsValidator.feedbackForLLM(code: content, filePath: path)
+          ?? swiftValidator.feedbackForLLM(code: content, filePath: path)
+        guard let error = feedback else { break }
+        retries += 1
+        debug("Validation retry \(retries) for \(path): \(error)")
+        memory.trackCall(estimatedTokens: 800)
+        let fixed = try await adapter.generateStructured(
+          prompt: "Fix this code.\nError: \(error)\n\nCode:\n\(content)",
+          system: "Fix the error. Return the complete corrected file.",
+          as: CreateParams.self
+        )
+        content = fixed.content
+      }
+      // Final validation check after retries exhausted
+      if let finalError = jsValidator.feedbackForLLM(code: content, filePath: path)
+          ?? swiftValidator.feedbackForLLM(code: content, filePath: path) {
+        debug("Validation failed after \(retries) retries for \(path): \(finalError)")
+        return "VALIDATION FAILED: \(finalError)"
       }
 
       memory.touch(path)
       metrics.filesModified += 1
       try files.write(path: path, content: content)
 
+      // Per-tool verification: confirm file was actually created
+      guard files.exists(path) else {
+        return "ERROR: File not created despite write succeeding: \(path)"
+      }
+
       let createDiff = diffPreview.diffWrite(filePath: path, existingContent: nil, newContent: content)
       lastDiffs.append(createDiff)
       return "Created \(path) (\(content.count) chars)"
 
-    case .write(let path, let content):
+    case .write(let path, var content):
       // Permission check via callback (CLI handles terminal I/O)
       let decision = await askPermission(tool: "write", target: path, detail: "\(content.count) chars")
       guard decision != .deny else { return "DENIED: write to \(path)" }
 
-      // JSC validation for JavaScript files (catch errors before writing)
-      if let feedback = jsValidator.feedbackForLLM(code: content, filePath: path) {
-        debug("JSC validation failed for \(path): \(feedback)")
-        return "VALIDATION FAILED: \(feedback)"
+      // Syntax validation with retry (JS via JSC, Swift via swiftc -parse)
+      var writeRetries = 0
+      while writeRetries < Config.maxValidationRetries {
+        let feedback = jsValidator.feedbackForLLM(code: content, filePath: path)
+          ?? swiftValidator.feedbackForLLM(code: content, filePath: path)
+        guard let error = feedback else { break }
+        writeRetries += 1
+        debug("Validation retry \(writeRetries) for \(path): \(error)")
+        memory.trackCall(estimatedTokens: 800)
+        let fixed = try await adapter.generateStructured(
+          prompt: "Fix this code.\nError: \(error)\n\nCode:\n\(content)",
+          system: "Fix the error. Return the complete corrected file.",
+          as: WriteParams.self
+        )
+        content = fixed.content
+      }
+      if let finalError = jsValidator.feedbackForLLM(code: content, filePath: path)
+          ?? swiftValidator.feedbackForLLM(code: content, filePath: path) {
+        debug("Validation failed after \(writeRetries) retries for \(path): \(finalError)")
+        return "VALIDATION FAILED: \(finalError)"
       }
 
       // Capture diff
@@ -693,8 +857,17 @@ public actor Orchestrator {
         try files.edit(path: path, find: find, replace: replace, fuzzy: true)
       }
 
+      // Per-tool verification: confirm the replacement text is present
+      let afterContent = try? files.read(path: path, maxTokens: 2000)
+      if let after = afterContent, !replace.isEmpty {
+        let checkSnippet = String(replace.prefix(60))
+        if !after.contains(checkSnippet) {
+          return "ERROR: Edit verification failed — replacement text not found in \(path)"
+        }
+      }
+
       // Capture after + generate diff
-      if let before, let _ = try? files.read(path: path, maxTokens: 2000) {
+      if let before, afterContent != nil {
         if let d = diffPreview.diff(filePath: path, originalContent: before, find: find, replace: replace) {
           lastDiffs.append(d)
         }
@@ -733,6 +906,43 @@ public actor Orchestrator {
     let outcome = (output.contains("ERROR") || output.contains("DENIED") || output.contains("FAILED")) ? "error" : "ok"
     let keyFact = lines.first.map(String.init) ?? "no output"
     return StepObservation(tool: tool, outcome: outcome, keyFact: String(keyFact.prefix(120)))
+  }
+
+  // MARK: - Helpers
+
+  /// Extract URLs from text for literal passthrough to code generation prompts.
+  /// These URLs should be embedded in generated code, NOT fetched.
+  static func extractURLs(_ text: String) -> [String] {
+    guard let detector = try? NSDataDetector(
+      types: NSTextCheckingResult.CheckingType.link.rawValue
+    ) else { return [] }
+    let range = NSRange(text.startIndex..., in: text)
+    return detector.matches(in: text, range: range).compactMap { match in
+      Range(match.range, in: text).map { String(text[$0]) }
+    }
+  }
+
+  /// Verify that key quoted terms from the user's query appear in the generated content.
+  /// Returns a description of missing content, or nil if all present.
+  static func verifyContent(content: String, query: String) -> String? {
+    // Extract double-quoted and single-quoted strings from the query
+    let pattern = #""([^"]+)"|'([^']+)'"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+    let range = NSRange(query.startIndex..., in: query)
+    let matches = regex.matches(in: query, range: range)
+
+    var missing: [String] = []
+    for match in matches {
+      for group in 1...2 {
+        if let r = Range(match.range(at: group), in: query) {
+          let value = String(query[r])
+          if !content.contains(value) {
+            missing.append(value)
+          }
+        }
+      }
+    }
+    return missing.isEmpty ? nil : "Missing required content: \(missing.joined(separator: ", "))"
   }
 
   private func shellEscape(_ s: String) -> String {

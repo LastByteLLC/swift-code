@@ -197,6 +197,28 @@ public struct SkillLoader: Sendable {
         tools: nil, maxSteps: nil
       ),
       MicroSkill(
+        name: "multi-edit-fix",
+        domain: "swift", taskTypes: ["fix", "refactor"],
+        hint: """
+          When a fix requires changing BOTH a function signature AND its body, plan multiple edit steps: \
+          step 1: edit the signature (return type, parameters), step 2: edit the body. \
+          For complex multi-location changes, use the patch tool (unified diff) instead of edit. \
+          Patch can change multiple locations in one step.
+          """,
+        tools: nil, maxSteps: nil
+      ),
+      MicroSkill(
+        name: "xcode-project-files",
+        domain: "swift", taskTypes: ["add", "fix"],
+        hint: """
+          Never generate .pbxproj, .xcworkspace, or Package.resolved directly. \
+          For SPM: edit Package.swift, run swift package resolve. \
+          For XcodeGen: edit project.yml, run xcodegen generate. \
+          Package.resolved is auto-generated — never edit it manually.
+          """,
+        tools: nil, maxSteps: nil
+      ),
+      MicroSkill(
         name: "swift-package-manifest",
         domain: "swift", taskTypes: ["add"],
         hint: """

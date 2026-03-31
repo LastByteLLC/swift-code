@@ -14,4 +14,5 @@ public enum LLMError: Error, Sendable {
   case guardrailViolation
   case generationFailed(String)
   case tokenBudgetExceeded(used: Int, limit: Int)
+  case contextOverflow(String)
 }

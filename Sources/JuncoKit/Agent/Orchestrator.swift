@@ -24,6 +24,9 @@ public actor Orchestrator {
   private let patchApplier: PatchApplier
   private let fileWatcher: FileWatcher
   private let lspClient: LSPClient
+  private let linter: PostGenerationLinter
+  private let errorExtractor: ErrorRegionExtractor
+  private let templateRenderer: TemplateRenderer
   private let workingDirectory: String
   public let domain: DomainConfig
   private let intentClassifier: IntentClassifier
@@ -64,6 +67,9 @@ public actor Orchestrator {
     self.intentClassifier = IntentClassifier()
     self.fileWatcher = FileWatcher(directory: workingDirectory)
     self.lspClient = LSPClient(workingDirectory: workingDirectory)
+    self.linter = PostGenerationLinter()
+    self.errorExtractor = ErrorRegionExtractor()
+    self.templateRenderer = TemplateRenderer()
     self.metrics = SessionMetrics()
   }
 
@@ -440,6 +446,9 @@ public actor Orchestrator {
       }
     }
 
+    // Build-fix reflexion loop: attempt to fix build errors before reflecting
+    await buildAndFix(memory: &memory)
+
     let reflection = try await reflect(memory: &memory)
     debug("REFLECT → succeeded:\(reflection.succeeded) insight:\(reflection.insight)")
 
@@ -689,10 +698,24 @@ public actor Orchestrator {
     )
     debug("  tool choice: \(choice.tool) — \(choice.reasoning)")
 
-    // Phase 2: Resolve and execute
-    let action = try await resolveToolAction(
-      tool: choice.tool, step: step, codeContext: codeContext, memory: &memory
-    )
+    // Phase 2: Resolve and execute (with two-phase fallback on context overflow)
+    let action: ToolAction
+    do {
+      action = try await resolveToolAction(
+        tool: choice.tool, step: step, codeContext: codeContext, memory: &memory
+      )
+    } catch let error as LLMError where choice.tool == "create" {
+      // Context overflow on create → fall back to two-phase generation
+      if case .contextOverflow = error, step.target.hasSuffix(".swift") {
+        debug("  context overflow on create — falling back to two-phase generation")
+        let twoPhaseContent = try await generateTwoPhase(step: step, memory: &memory)
+        let linted = linter.lint(content: twoPhaseContent, filePath: step.target)
+        let fallbackAction = ToolAction.create(path: step.target, content: linted)
+        let toolOutput = await executeToolSafe(action: fallbackAction, memory: &memory)
+        return compressObservation(tool: "create", output: toolOutput, step: step.instruction)
+      }
+      throw error
+    }
     debug("  action: \(action)")
 
     let toolOutput = await executeToolSafe(action: action, memory: &memory)
@@ -726,21 +749,56 @@ public actor Orchestrator {
       return .read(path: p.filePath)
 
     case "create":
+      let createTarget = step.target.isEmpty ? "" : step.target
+      let createTargetLower = createTarget.lowercased()
+
+      // Route 1: Template-based generation for structured file formats
+      // The model fills in simple intent fields; the template guarantees valid syntax.
+      if templateRenderer.shouldUseTemplate(filePath: createTarget) {
+        let intentPrompt = "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 200))"
+        memory.trackCall(estimatedTokens: 600)
+
+        if createTargetLower.hasSuffix(".entitlements") {
+          let intent = try await adapter.generateStructured(
+            prompt: intentPrompt,
+            system: "Determine which entitlements this app needs based on the user's request.",
+            as: EntitlementsIntent.self
+          )
+          return .create(path: createTarget, content: templateRenderer.renderEntitlements(intent))
+
+        } else if createTargetLower.hasSuffix("package.swift") {
+          let intent = try await adapter.generateStructured(
+            prompt: intentPrompt,
+            system: "Determine the SPM package configuration: name, targets, dependencies, platforms.",
+            as: PackageIntent.self
+          )
+          return .create(path: createTarget, content: templateRenderer.renderPackage(intent))
+
+        } else if createTargetLower.hasSuffix("info.plist") || createTargetLower.hasSuffix(".plist") {
+          let intent = try await adapter.generateStructured(
+            prompt: intentPrompt,
+            system: "Determine the Info.plist configuration: display name, bundle ID, privacy permissions needed.",
+            as: PlistIntent.self
+          )
+          return .create(path: createTarget, content: templateRenderer.renderPlist(intent))
+
+        } else if createTargetLower.hasSuffix(".xcprivacy") {
+          let intent = try await adapter.generateStructured(
+            prompt: intentPrompt,
+            system: "Determine the privacy manifest: accessed API types, reasons, tracking, collected data.",
+            as: PrivacyManifestIntent.self
+          )
+          return .create(path: createTarget, content: templateRenderer.renderPrivacyManifest(intent))
+        }
+      }
+
+      // Route 2: LLM-generated content for code and prose files
       let createURLs = Self.extractURLs(memory.query)
       let createURLHint = createURLs.isEmpty ? "" : "\nIMPORTANT: Use these exact URLs (do not substitute): \(createURLs.joined(separator: ", "))"
 
-      // Context-aware system prompt based on target file
       var createSystem = "Generate file path and complete content for a new file. Follow the user's request precisely."
-      let target = step.target.lowercased()
-      if target.hasSuffix("package.swift") {
-        createSystem = "Generate a valid SPM Package.swift manifest. Use: import PackageDescription; let package = Package(name:, platforms:, products:, dependencies:, targets:). This is NOT a regular Swift source file."
-      } else if target.hasSuffix(".entitlements") {
-        createSystem += " Use exact Apple entitlement key strings. Sandbox: com.apple.security.app-sandbox. Network: com.apple.security.network.client."
-      } else if target.hasSuffix(".plist") {
-        createSystem += " Generate valid XML plist with correct Apple keys."
-      }
       // Inject domain skill hint for Swift files
-      if target.hasSuffix(".swift") {
+      if createTargetLower.hasSuffix(".swift") {
         let skillHint = skillLoader.skillHints(
           domain: memory.intent?.domain ?? "swift",
           taskType: memory.intent?.taskType ?? "add",
@@ -754,7 +812,7 @@ public actor Orchestrator {
         system: createSystem,
         as: CreateParams.self
       )
-      let path = step.target.isEmpty ? p.filePath : step.target
+      let path = createTarget.isEmpty ? p.filePath : createTarget
       return .create(path: path, content: p.content)
 
     case "write":
@@ -802,6 +860,112 @@ public actor Orchestrator {
 
     default:
       return .bash(command: "echo 'Unknown tool: \(tool)'")
+    }
+  }
+
+  // MARK: - Two-Phase Code Generation
+
+  /// Generate a complex Swift file by first creating a skeleton (imports, type, properties,
+  /// method signatures), then filling each method body in a separate LLM call.
+  /// Each phase gets its own fresh 4K context window — no overflow risk.
+  private func generateTwoPhase(
+    step: PlanStep,
+    memory: inout WorkingMemory
+  ) async throws -> String {
+    let query = TokenBudget.truncate(memory.query, toTokens: 150)
+    debug("  two-phase: generating skeleton")
+
+    // Phase 1: Skeleton
+    memory.trackCall(estimatedTokens: 800)
+    let skeleton = try await adapter.generateStructured(
+      prompt: "Create the structure for: \(step.instruction)\nUser request: \(query)",
+      system: "Generate ONLY the file skeleton: imports, type declaration, properties, and method signatures WITHOUT bodies. No implementation code.",
+      as: CodeSkeleton.self
+    )
+
+    // Assemble skeleton
+    var lines: [String] = []
+    lines.append(skeleton.imports)
+    lines.append("")
+    lines.append(skeleton.typeDeclaration)
+    for prop in skeleton.properties.components(separatedBy: "\n") where !prop.isEmpty {
+      lines.append("    \(prop.trimmingCharacters(in: .whitespaces))")
+    }
+    lines.append("")
+
+    // Phase 2: Fill each method body
+    let propsSummary = TokenBudget.truncate(skeleton.properties, toTokens: 80)
+    for sig in skeleton.methodSignatures where !sig.isEmpty {
+      let shortSig = String(sig.prefix(120))
+      debug("  two-phase: filling method \(shortSig.prefix(50))")
+      memory.trackCall(estimatedTokens: 400)
+      let body = try await adapter.generateStructured(
+        prompt: "\(shortSig)\nContext: \(propsSummary)",
+        system: "Implement this Swift method. Return only the method with body. Be concise.",
+        as: MethodBody.self
+      )
+      lines.append("    \(body.implementation.trimmingCharacters(in: .whitespaces))")
+      lines.append("")
+    }
+
+    lines.append("}")
+    var result = lines.joined(separator: "\n")
+
+    // Lint the assembled file
+    let path = step.target
+    result = linter.lint(content: result, filePath: path)
+
+    return result
+  }
+
+  // MARK: - Build-Fix Reflexion Loop
+
+  /// After all execute steps, run a build and attempt to fix errors.
+  /// Uses targeted retry: extract error region, fix just that part.
+  private func buildAndFix(memory: inout WorkingMemory, maxCycles: Int = 2) async {
+    guard metrics.filesModified > 0 else { return }
+    guard domain.buildCommand != nil else { return }
+
+    for cycle in 0..<maxCycles {
+      let buildResult = await buildRunner.verify()
+      guard !buildResult.isEmpty, buildResult.contains("error:") else {
+        if cycle > 0 { debug("Build-fix cycle \(cycle + 1): clean build") }
+        return
+      }
+
+      debug("Build-fix cycle \(cycle + 1): \(buildResult.prefix(100))")
+      lastBuildResult = buildResult
+
+      let errors = errorExtractor.parseErrors(buildResult)
+      guard !errors.isEmpty else { return }
+
+      // Fix up to 3 errors per cycle, only in files we modified
+      for error in errors.prefix(3) {
+        let errorPath = error.filePath
+        guard memory.touchedFiles.contains(errorPath) || memory.touchedFiles.contains(where: { errorPath.hasSuffix($0) }) else {
+          continue // Don't touch files we didn't modify
+        }
+
+        guard let fileContent = try? files.read(path: errorPath, maxTokens: 2000) else { continue }
+        guard let region = errorExtractor.extract(content: fileContent, errorLine: error.line) else { continue }
+
+        debug("  build-fix: \(errorPath):\(error.line) — \(error.message)")
+        memory.trackCall(estimatedTokens: 500)
+
+        do {
+          let fixed = try await adapter.generateStructured(
+            prompt: "Fix this code.\nError: \(error.message)\n\nCode:\n\(region.text)",
+            system: "Fix ONLY this code region. Return the corrected code.",
+            as: CodeFragment.self
+          )
+
+          let newContent = errorExtractor.splice(original: fileContent, region: region, fix: fixed.content)
+          let linted = linter.lint(content: newContent, filePath: errorPath)
+          try files.write(path: errorPath, content: linted)
+        } catch {
+          debug("  build-fix failed: \(error)")
+        }
+      }
     }
   }
 
@@ -870,23 +1034,45 @@ public actor Orchestrator {
       let createDecision = await askPermission(tool: "create", target: path, detail: "\(content.count) chars")
       guard createDecision != .deny else { return "DENIED: create \(path)" }
 
-      // Syntax validation with retry (JS via JSC, Swift via swiftc -parse)
+      // Step 1: Deterministic lint (instant, no LLM call)
+      content = linter.lint(content: content, filePath: path)
+
+      // Step 2: Syntax validation with TARGETED retry
       var retries = 0
       while retries < Config.maxValidationRetries {
         let feedback = jsValidator.feedbackForLLM(code: content, filePath: path)
           ?? swiftValidator.feedbackForLLM(code: content, filePath: path)
         guard let error = feedback else { break }
         retries += 1
-        debug("Validation retry \(retries) for \(path): \(error)")
-        memory.trackCall(estimatedTokens: 800)
-        let fixed = try await adapter.generateStructured(
-          prompt: "Fix this code.\nError: \(error)\n\nCode:\n\(content)",
-          system: "Fix the error. Return the complete corrected file.",
-          as: CreateParams.self
-        )
-        content = fixed.content
+
+        // Try targeted fix: extract the error region, fix just that part
+        if let region = errorExtractor.extract(content: content, errorMessage: error) {
+          debug("Targeted retry \(retries) for \(path) (lines \(region.startLine)-\(region.endLine)): \(error)")
+          memory.trackCall(estimatedTokens: 500)
+          let fixPrompt = "Fix this code.\nError: \(String(error.prefix(200)))\n\nCode:\n\(region.text)"
+          let fixed = try await adapter.generateStructured(
+            prompt: fixPrompt,
+            system: "Fix ONLY this code region. Return the corrected code.",
+            as: CodeFragment.self
+          )
+          content = errorExtractor.splice(original: content, region: region, fix: fixed.content)
+        } else {
+          // Can't isolate region — fall back to full-file retry (truncated)
+          debug("Full retry \(retries) for \(path): \(error)")
+          memory.trackCall(estimatedTokens: 800)
+          let truncatedCode = TokenBudget.truncate(content, toTokens: 800)
+          let fixed = try await adapter.generateStructured(
+            prompt: "Fix this code.\nError: \(String(error.prefix(200)))\n\nCode:\n\(truncatedCode)",
+            system: "Fix the error. Return the complete corrected file.",
+            as: CreateParams.self
+          )
+          content = fixed.content
+        }
+        // Re-lint after every fix
+        content = linter.lint(content: content, filePath: path)
       }
-      // Final validation check after retries exhausted
+
+      // Final validation check
       if let finalError = validatorRegistry.validate(code: content, filePath: path) {
         debug("Validation failed after \(retries) retries for \(path): \(finalError)")
         return "VALIDATION FAILED: \(finalError)"
@@ -896,7 +1082,6 @@ public actor Orchestrator {
       metrics.filesModified += 1
       try files.write(path: path, content: content)
 
-      // Per-tool verification: confirm file was actually created
       guard files.exists(path) else {
         return "ERROR: File not created despite write succeeding: \(path)"
       }
@@ -906,32 +1091,46 @@ public actor Orchestrator {
       return "Created \(path) (\(content.count) chars)"
 
     case .write(let path, var content):
-      // Permission check via callback (CLI handles terminal I/O)
       let decision = await askPermission(tool: "write", target: path, detail: "\(content.count) chars")
       guard decision != .deny else { return "DENIED: write to \(path)" }
 
-      // Syntax validation with retry (JS via JSC, Swift via swiftc -parse)
+      // Lint → validate → targeted retry (same pipeline as create)
+      content = linter.lint(content: content, filePath: path)
+
       var writeRetries = 0
       while writeRetries < Config.maxValidationRetries {
         let feedback = jsValidator.feedbackForLLM(code: content, filePath: path)
           ?? swiftValidator.feedbackForLLM(code: content, filePath: path)
         guard let error = feedback else { break }
         writeRetries += 1
-        debug("Validation retry \(writeRetries) for \(path): \(error)")
-        memory.trackCall(estimatedTokens: 800)
-        let fixed = try await adapter.generateStructured(
-          prompt: "Fix this code.\nError: \(error)\n\nCode:\n\(content)",
-          system: "Fix the error. Return the complete corrected file.",
-          as: WriteParams.self
-        )
-        content = fixed.content
+
+        if let region = errorExtractor.extract(content: content, errorMessage: error) {
+          debug("Targeted retry \(writeRetries) for \(path) (lines \(region.startLine)-\(region.endLine)): \(error)")
+          memory.trackCall(estimatedTokens: 500)
+          let fixed = try await adapter.generateStructured(
+            prompt: "Fix this code.\nError: \(String(error.prefix(200)))\n\nCode:\n\(region.text)",
+            system: "Fix ONLY this code region. Return the corrected code.",
+            as: CodeFragment.self
+          )
+          content = errorExtractor.splice(original: content, region: region, fix: fixed.content)
+        } else {
+          debug("Full retry \(writeRetries) for \(path): \(error)")
+          memory.trackCall(estimatedTokens: 800)
+          let truncatedCode = TokenBudget.truncate(content, toTokens: 800)
+          let fixed = try await adapter.generateStructured(
+            prompt: "Fix this code.\nError: \(String(error.prefix(200)))\n\nCode:\n\(truncatedCode)",
+            system: "Fix the error. Return the complete corrected file.",
+            as: WriteParams.self
+          )
+          content = fixed.content
+        }
+        content = linter.lint(content: content, filePath: path)
       }
       if let finalError = validatorRegistry.validate(code: content, filePath: path) {
         debug("Validation failed after \(writeRetries) retries for \(path): \(finalError)")
         return "VALIDATION FAILED: \(finalError)"
       }
 
-      // Capture diff
       let existing = try? files.read(path: path, maxTokens: 2000)
       memory.touch(path)
       metrics.filesModified += 1

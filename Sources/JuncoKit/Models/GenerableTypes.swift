@@ -184,3 +184,29 @@ public struct StepCheck: Codable, Sendable {
   @Guide(description: "If not complete, what remains to be done")
   public var remaining: String
 }
+
+// MARK: - Two-Phase Code Generation
+
+/// Phase 1: Generate file skeleton — imports, type declaration, properties, method signatures.
+/// Used when a file is too complex for single-shot generation within the 4K context window.
+@Generable
+public struct CodeSkeleton: Codable, Sendable {
+  @Guide(description: "Import statements, one per line")
+  public var imports: String
+
+  @Guide(description: "Type declaration line: struct/class/actor/enum Name: Protocols {")
+  public var typeDeclaration: String
+
+  @Guide(description: "Property declarations, one per line, with types")
+  public var properties: String
+
+  @Guide(description: "Method signatures without bodies, one per line")
+  public var methodSignatures: [String]
+}
+
+/// Phase 2: Generate a single method body.
+@Generable
+public struct MethodBody: Codable, Sendable {
+  @Guide(description: "The complete method implementation including signature and body")
+  public var implementation: String
+}

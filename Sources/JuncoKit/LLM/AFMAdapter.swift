@@ -88,16 +88,39 @@ public actor AFMAdapter: LLMAdapter {
   public func generateStructured<T: GenerableContent>(
     prompt: String,
     system: String?,
-    as type: T.Type
+    as type: T.Type,
+    options: GenerationOptions? = nil
   ) async throws -> T {
     let session = makeSession(system: system)
 
     do {
-      let response = try await session.respond(to: prompt, generating: type)
-      return response.content
+      if let options {
+        let response = try await session.respond(to: prompt, generating: type, options: options)
+        return response.content
+      } else {
+        let response = try await session.respond(to: prompt, generating: type)
+        return response.content
+      }
     } catch let error as LanguageModelSession.GenerationError {
       throw LLMError.from(error)
     }
+  }
+
+  // MARK: - Token counting
+
+  /// Count tokens for a prompt string. Uses exact API on iOS 26.4+, falls back to estimation.
+  public func countTokens(_ text: String) async -> Int {
+    let model: SystemLanguageModel = loraAdapter.map { SystemLanguageModel(adapter: $0) } ?? .default
+    if #available(macOS 26.4, iOS 26.4, *) {
+      return (try? await model.tokenCount(for: text)) ?? TokenBudget.estimate(text)
+    }
+    return TokenBudget.estimate(text)
+  }
+
+  /// The model's context window size.
+  public var contextSize: Int {
+    let model: SystemLanguageModel = loraAdapter.map { SystemLanguageModel(adapter: $0) } ?? .default
+    return model.contextSize
   }
 }
 
@@ -115,6 +138,8 @@ extension LLMError {
       return .guardrailViolation
     case .assetsUnavailable:
       return .unavailable("On-device model assets not downloaded. Check Settings > Apple Intelligence.")
+    case .exceededContextWindowSize(let context):
+      return .contextOverflow(context.debugDescription)
     default:
       return .generationFailed(error.localizedDescription)
     }

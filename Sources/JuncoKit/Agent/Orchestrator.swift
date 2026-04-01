@@ -5,6 +5,7 @@
 // micro-skills, scratchpad, web search, notifications.
 
 import Foundation
+import FoundationModels
 
 public actor Orchestrator {
 
@@ -698,21 +699,37 @@ public actor Orchestrator {
     )
     debug("  tool choice: \(choice.tool) — \(choice.reasoning)")
 
-    // Phase 2: Resolve and execute (with two-phase fallback on context overflow)
+    // Phase 2: Resolve and execute (with fallback on context overflow)
     let action: ToolAction
     do {
       action = try await resolveToolAction(
         tool: choice.tool, step: step, codeContext: codeContext, memory: &memory
       )
     } catch let error as LLMError where choice.tool == "create" {
-      // Context overflow on create → fall back to two-phase generation
-      if case .contextOverflow = error, step.target.hasSuffix(".swift") {
-        debug("  context overflow on create — falling back to two-phase generation")
-        let twoPhaseContent = try await generateTwoPhase(step: step, memory: &memory)
-        let linted = linter.lint(content: twoPhaseContent, filePath: step.target)
-        let fallbackAction = ToolAction.create(path: step.target, content: linted)
-        let toolOutput = await executeToolSafe(action: fallbackAction, memory: &memory)
-        return compressObservation(tool: "create", output: toolOutput, step: step.instruction)
+      if case .contextOverflow = error {
+        if step.target.hasSuffix(".swift") {
+          // Swift files: two-phase generation (skeleton + fill)
+          debug("  context overflow on create — falling back to two-phase generation")
+          let twoPhaseContent = try await generateTwoPhase(step: step, memory: &memory)
+          let linted = linter.lint(content: twoPhaseContent, filePath: step.target)
+          let fallbackAction = ToolAction.create(path: step.target, content: linted)
+          let toolOutput = await executeToolSafe(action: fallbackAction, memory: &memory)
+          return compressObservation(tool: "create", output: toolOutput, step: step.instruction)
+        } else {
+          // Non-Swift files: retry with ultra-minimal prompt
+          debug("  context overflow on create — retrying with minimal prompt")
+          let minimalPrompt = "Create \(step.target): \(String(memory.query.prefix(100)))"
+          let retry = try await adapter.generateStructured(
+            prompt: minimalPrompt,
+            system: "Generate the file content only. Be very concise.",
+            as: CreateParams.self,
+            options: GenerationOptions(maximumResponseTokens: 2000)
+          )
+          let retryPath = step.target.isEmpty ? retry.filePath : step.target
+          let fallbackAction = ToolAction.create(path: retryPath, content: retry.content)
+          let toolOutput = await executeToolSafe(action: fallbackAction, memory: &memory)
+          return compressObservation(tool: "create", output: toolOutput, step: step.instruction)
+        }
       }
       throw error
     }
@@ -796,21 +813,28 @@ public actor Orchestrator {
       let createURLs = Self.extractURLs(memory.query)
       let createURLHint = createURLs.isEmpty ? "" : "\nIMPORTANT: Use these exact URLs (do not substitute): \(createURLs.joined(separator: ", "))"
 
-      var createSystem = "Generate file path and complete content for a new file. Follow the user's request precisely."
+      var createSystem = "Generate the file content. Be concise."
       // Inject domain skill hint for Swift files
       if createTargetLower.hasSuffix(".swift") {
         let skillHint = skillLoader.skillHints(
           domain: memory.intent?.domain ?? "swift",
           taskType: memory.intent?.taskType ?? "add",
-          budget: 150
+          budget: 100
         )
         if let hint = skillHint { createSystem += " " + hint }
       }
 
+      // Budget-aware generation: estimate input tokens, cap output
+      let createPrompt = "\(base)\nRequest: \(TokenBudget.truncate(memory.query, toTokens: 120))\(createURLHint)"
+      let inputEstimate = TokenBudget.estimate(createPrompt) + TokenBudget.estimate(createSystem) + 150 // schema overhead
+      let maxOutput = max(500, TokenBudget.contextWindow - inputEstimate - 100) // 100 token safety margin
+      let createOptions = GenerationOptions(maximumResponseTokens: maxOutput)
+
       let p = try await adapter.generateStructured(
-        prompt: "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 150))\(createURLHint)",
+        prompt: createPrompt,
         system: createSystem,
-        as: CreateParams.self
+        as: CreateParams.self,
+        options: createOptions
       )
       let path = createTarget.isEmpty ? p.filePath : createTarget
       return .create(path: path, content: p.content)
@@ -836,10 +860,14 @@ public actor Orchestrator {
         )
         if let hint = skillHint { editSystem += " " + hint }
       }
+      let editPrompt = "\(base)\nRequest: \(TokenBudget.truncate(memory.query, toTokens: 100))\n\nFile:\n\(TokenBudget.truncate(codeContext, toTokens: 800))"
+      let editInputEst = TokenBudget.estimate(editPrompt) + TokenBudget.estimate(editSystem) + 150
+      let editMaxOutput = max(400, TokenBudget.contextWindow - editInputEst - 100)
       let p = try await adapter.generateStructured(
-        prompt: "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 150))\n\nFile content:\n\(codeContext)",
+        prompt: editPrompt,
         system: editSystem,
-        as: EditParams.self
+        as: EditParams.self,
+        options: GenerationOptions(maximumResponseTokens: editMaxOutput)
       )
       let editPath = step.target.isEmpty ? p.filePath : step.target
       return .edit(path: editPath, find: p.find, replace: p.replace)

@@ -3,7 +3,7 @@
 ## Development Setup
 
 ```bash
-git clone https://github.com/your-org/junco.git
+git clone https://github.com/LastByteLLC/junco.git
 cd junco
 swift build
 swift test

@@ -53,7 +53,7 @@ public struct PostGenerationLinter: Sendable {
 
   /// Add missing imports based on type usage.
   private func fixMissingImports(_ content: String) -> String {
-    var result = content
+    let result = content
     let lines = content.components(separatedBy: "\n")
     var insertIndex = 0 // After last import line
     for (i, line) in lines.enumerated() {

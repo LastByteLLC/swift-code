@@ -64,9 +64,9 @@ public struct FileCompleter: CompletionProvider {
 
 public struct CommandCompleter: CompletionProvider {
   public static let allCommands = [
-    "/clear", "/context", "/domain", "/files", "/fork", "/forks",
+    "/clear", "/context", "/files", "/fork", "/forks",
     "/git", "/help", "/lang", "/metrics", "/notes", "/paste", "/pastes",
-    "/reflections", "/search", "/session", "/speak", "/undo", "/unfork",
+    "/reflections", "/session", "/speak", "/undo", "/unfork",
   ]
 
   private let maxResults: Int
@@ -292,17 +292,6 @@ public struct LineEditor: Sendable {
     return (row, col)
   }
 
-  /// Total number of terminal rows the prompt + buffer occupies.
-  private func totalRows(
-    buffer: [Character], promptWidth: Int, screenWidth: Int, extraSuffix: Int = 0
-  ) -> Int {
-    let (row, col) = cursorPosition(
-      in: buffer, at: buffer.count, promptWidth: promptWidth, screenWidth: screenWidth
-    )
-    let lastLineLen = col + extraSuffix
-    return row + max(1, (lastLineLen + screenWidth - 1) / screenWidth)
-  }
-
   private func render(
     driver: any TerminalIO,
     buffer: [Character],
@@ -314,12 +303,6 @@ public struct LineEditor: Sendable {
   ) {
     let width = max(driver.screenWidth, 20)
     let escSuffix = escHint ? "  " + TerminalDriver.dim("Esc again to clear") : ""
-    let escVisibleLen = escHint ? 20 : 0
-
-    // How many rows the content will occupy
-    let contentLines = totalRows(
-      buffer: buffer, promptWidth: promptWidth, screenWidth: width, extraSuffix: escVisibleLen
-    )
 
     // Move to the start of our content
     if prevLines > 1 {
@@ -352,7 +335,7 @@ public struct LineEditor: Sendable {
       driver.moveUp(completions.count)
     }
 
-    // Position cursor at the correct row+col
+    // Position cursor at the correct row+col within the content area
     let curPos = cursorPosition(in: buffer, at: cursor, promptWidth: promptWidth, screenWidth: width)
     let endPos = cursorPosition(in: buffer, at: buffer.count, promptWidth: promptWidth, screenWidth: width)
 
@@ -361,7 +344,10 @@ public struct LineEditor: Sendable {
     driver.moveTo(column: curPos.col + 1)
     driver.flush()
 
-    prevLines = contentLines + completions.count
+    // Track cursor's row within the content area. On next render,
+    // moveUp(prevLines - 1) moves from cursor position back to the top.
+    // Completions below the cursor are cleaned by clearToEndOfScreen().
+    prevLines = curPos.row + 1
   }
 
   private func finalRender(driver: any TerminalIO, buffer: [Character], prevLines: Int) {

@@ -361,33 +361,40 @@ struct Junco: AsyncParsableCommand {
     translator: TranslationService? = nil
   ) async throws {
     let taskStart = Date()
-    let progress = ProgressBar(phrases: phrases)
     let wordCounter = WordCounter()
+    let spinner = Spinner(phrases: phrases)
 
     // Build pipeline callbacks — all user I/O happens here in the CLI layer,
     // never inside the orchestrator actor (which would corrupt terminal state).
     let callbacks = PipelineCallbacks(
-      onProgress: { step, total, description in
-        let status = progress.render(step: step, total: total, tool: "", target: description)
-        Terminal.status(status)
+      onProgress: { [spinner] step, total, description in
+        await spinner.update(stage: "execute", detail: "[\(step)/\(total)] \(description)")
       },
-      onStepError: { step, error in
-        Terminal.clearLine()
+      onStepError: { [spinner] step, error in
+        await spinner.stop()
         Terminal.line(Style.red("  Step \(step) failed: \(error)"))
         if Terminal.isInteractive {
           print("  [\(Style.cyan("r"))]etry / [\(Style.cyan("s"))]kip / [\(Style.cyan("a"))]bort? ", terminator: "")
           fflush(stdout)
-          guard let choice = Swift.readLine()?.lowercased().first else { return .skip }
+          guard let choice = Swift.readLine()?.lowercased().first else {
+            await spinner.start(stage: "execute")
+            return .skip
+          }
           switch choice {
-          case "r": return .retry
+          case "r":
+            await spinner.start(stage: "execute")
+            return .retry
           case "a": return .abort
-          default:  return .skip
+          default:
+            await spinner.start(stage: "execute")
+            return .skip
           }
         }
+        await spinner.start(stage: "execute")
         return .skip
       },
-      onPermission: { tool, target, detail in
-        Terminal.clearLine()
+      onPermission: { [spinner] tool, target, detail in
+        await spinner.stop()
         let prompt = PermissionService.promptText(tool: tool, target: target, detail: detail)
         Terminal.line(Style.yellow(prompt))
         if Terminal.isInteractive {
@@ -396,22 +403,28 @@ struct Junco: AsyncParsableCommand {
           guard let choice = Swift.readLine()?.lowercased().trimmingCharacters(in: .whitespaces) else {
             return .deny
           }
+          let decision: PermissionDecision
           switch choice {
-          case "y", "yes", "": return .allow
-          case "a", "always":  return .alwaysAllow
-          default:             return .deny
+          case "y", "yes", "": decision = .allow
+          case "a", "always":  decision = .alwaysAllow
+          default:             decision = .deny
           }
+          if decision != .deny {
+            await spinner.start(stage: "execute")
+          }
+          return decision
         }
+        await spinner.start(stage: "execute")
         return .allow  // Non-interactive: auto-allow
       },
-      onStream: { [wordCounter] chunk in
+      onStream: { [wordCounter, spinner] chunk in
         wordCounter.add(chunk)
         let count = wordCounter.count
-        Terminal.status("\(ThinkingPhrases.spinner(tick: count)) Generating... \(count) words")
+        await spinner.update(detail: "\(count) words")
       }
     )
 
-    Terminal.status(progress.renderStage("classify"))
+    await spinner.start(stage: "classify")
 
     do {
       let result = try await orchestrator.run(
@@ -420,7 +433,7 @@ struct Junco: AsyncParsableCommand {
         urlContext: urlContext,
         callbacks: callbacks
       )
-      Terminal.clearLine()
+      await spinner.stop()
 
       // Translate output to session language if non-English session
       var translatedInsight: String?
@@ -459,7 +472,7 @@ struct Junco: AsyncParsableCommand {
       await notifications.notifyIfSlow(taskStart: taskStart, query: query)
 
     } catch {
-      Terminal.clearLine()
+      await spinner.stop()
       Toast.showError(error)
 
       await session.recordTurn(TurnSummary(

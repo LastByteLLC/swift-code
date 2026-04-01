@@ -59,7 +59,7 @@ public struct TokenGuard: Sendable {
     var currentPrompt = prompt
 
     let systemTokens = await measure(currentSystem, using: adapter)
-    var promptTokens = await measure(currentPrompt, using: adapter)
+    let promptTokens = await measure(currentPrompt, using: adapter)
 
     // If it fits, return as-is (common case — avoid unnecessary work)
     if systemTokens + promptTokens <= budget {

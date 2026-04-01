@@ -100,7 +100,10 @@ public struct AdapterDownloader: Sendable {
   }
 
   private func downloadFile(from url: URL, to destination: URL, label: String?, expectedSHA256: String? = nil) async throws {
-    let (tempURL, response) = try await URLSession.shared.download(from: url, delegate: label.map { ProgressDelegate(label: $0) })
+    var request = URLRequest(url: url)
+    request.setValue("junco/0.4 (on-device coding agent)", forHTTPHeaderField: "User-Agent")
+
+    let (bytes, response) = try await URLSession.shared.bytes(for: request)
 
     guard let httpResponse = response as? HTTPURLResponse,
           (200...299).contains(httpResponse.statusCode) else {
@@ -108,26 +111,74 @@ public struct AdapterDownloader: Sendable {
       throw DownloadError.httpError(code)
     }
 
-    // Verify SHA-256 integrity if expected hash is provided
+    let expectedLength = httpResponse.expectedContentLength  // -1 if unknown
+    let showProgress = label != nil && expectedLength > 0
+
+    // Stream bytes to a temporary file with progress reporting
+    let tempDir = FileManager.default.temporaryDirectory
+    let tempFile = tempDir.appendingPathComponent(UUID().uuidString)
+    FileManager.default.createFile(atPath: tempFile.path, contents: nil)
+    let handle = try FileHandle(forWritingTo: tempFile)
+    defer { try? handle.close() }
+
+    var totalWritten: Int64 = 0
+    var lastPercent = -1
+    var buffer = Data()
+    let flushThreshold = 64 * 1024  // Flush to disk every 64KB
+
+    for try await byte in bytes {
+      buffer.append(byte)
+
+      if buffer.count >= flushThreshold {
+        handle.write(buffer)
+        totalWritten += Int64(buffer.count)
+        buffer.removeAll(keepingCapacity: true)
+
+        // Update progress bar
+        if showProgress {
+          let percent = Int(Double(totalWritten) / Double(expectedLength) * 100)
+          if percent != lastPercent {
+            lastPercent = percent
+            let mbWritten = Double(totalWritten) / 1_048_576
+            let mbTotal = Double(expectedLength) / 1_048_576
+            let barWidth = 30
+            let filled = Int(Double(barWidth) * Double(percent) / 100)
+            let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: barWidth - filled)
+            print("\r\(label!) [\(bar)] \(percent)% (\(String(format: "%.1f", mbWritten))/\(String(format: "%.1f", mbTotal)) MB)", terminator: "")
+            fflush(stdout)
+          }
+        }
+      }
+    }
+
+    // Flush remaining bytes
+    if !buffer.isEmpty {
+      handle.write(buffer)
+      totalWritten += Int64(buffer.count)
+    }
+    try handle.close()
+
+    // Clear progress line
+    if showProgress {
+      print("\r\u{1B}[K", terminator: "")
+      fflush(stdout)
+    }
+
+    // Verify SHA-256 integrity
     if let expected = expectedSHA256 {
-      let data = try Data(contentsOf: tempURL)
+      let data = try Data(contentsOf: tempFile)
       let actual = sha256(data)
       guard actual == expected else {
+        try? FileManager.default.removeItem(at: tempFile)
         throw DownloadError.integrityCheckFailed(expected: expected, actual: actual)
       }
     }
 
     // Move to final location
-    let fm = FileManager.default
-    if fm.fileExists(atPath: destination.path) {
-      try fm.removeItem(at: destination)
+    if FileManager.default.fileExists(atPath: destination.path) {
+      try FileManager.default.removeItem(at: destination)
     }
-    try fm.moveItem(at: tempURL, to: destination)
-
-    if label != nil {
-      print("\r\u{1B}[K", terminator: "")
-      fflush(stdout)
-    }
+    try FileManager.default.moveItem(at: tempFile, to: destination)
   }
 
   /// Compute SHA-256 hex string for data.
@@ -154,42 +205,3 @@ public struct AdapterDownloader: Sendable {
   }
 }
 
-// MARK: - Progress Delegate
-
-/// URLSession delegate that prints a progress bar to the terminal.
-private final class ProgressDelegate: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
-  let label: String
-  private var lastPrintedPercent = -1
-
-  init(label: String) {
-    self.label = label
-    super.init()
-  }
-
-  func urlSession(
-    _ session: URLSession,
-    downloadTask: URLSessionDownloadTask,
-    didWriteData bytesWritten: Int64,
-    totalBytesWritten: Int64,
-    totalBytesExpectedToWrite: Int64
-  ) {
-    guard totalBytesExpectedToWrite > 0 else { return }
-
-    let percent = Int(Double(totalBytesWritten) / Double(totalBytesExpectedToWrite) * 100)
-    guard percent != lastPrintedPercent else { return }
-    lastPrintedPercent = percent
-
-    let mbWritten = Double(totalBytesWritten) / 1_048_576
-    let mbTotal = Double(totalBytesExpectedToWrite) / 1_048_576
-    let barWidth = 30
-    let filled = Int(Double(barWidth) * Double(percent) / 100)
-    let bar = String(repeating: "█", count: filled) + String(repeating: "░", count: barWidth - filled)
-
-    print("\r\(label) [\(bar)] \(percent)% (\(String(format: "%.1f", mbWritten))/\(String(format: "%.1f", mbTotal)) MB)", terminator: "")
-    fflush(stdout)
-  }
-
-  func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo location: URL) {
-    // handled in the calling code
-  }
-}

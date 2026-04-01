@@ -131,7 +131,101 @@ struct LineEditorTests {
     let vt = VirtualTerminalDriver(keys: [.char("x"), .enter])
     let editor = LineEditor(prompt: "test> ", completers: [])
     _ = editor.readLine(driver: vt)
-    let visible = vt.visibleOutput
-    #expect(visible.contains("test>"))
+    #expect(vt.row(0).contains("test>"))
+  }
+
+  // MARK: - Completion Cursor Tests (regression: arrow keys swallowing lines above)
+
+  /// A test completer that always returns fixed completions when "@" is typed.
+  private struct StubFileCompleter: CompletionProvider {
+    let files: [String]
+    func completions(for input: String, cursorPosition: Int) -> [Completion] {
+      let before = String(input.prefix(cursorPosition))
+      guard let at = before.lastIndex(of: "@") else { return [] }
+      let replaceFrom = before.distance(from: before.startIndex, to: at)
+      return files.map { Completion(display: $0, insertion: "@\($0)", replaceFrom: replaceFrom) }
+    }
+  }
+
+  @Test("arrow navigation in completions does not overshoot cursor above prompt")
+  func completionArrowsNoOvershoot() {
+    // Simulate: type "@", get 3 completions, press down 3 times, then tab+enter
+    let vt = VirtualTerminalDriver(keys: [
+      .char("@"),
+      .down, .down, .down,  // navigate completions
+      .tab,                 // accept
+      .enter,               // submit
+    ])
+    // Place cursor at row 5 (simulating welcome banner above)
+    vt.setCursorRow(5)
+
+    let completer = StubFileCompleter(files: ["README.md", "Package.swift", "main.swift"])
+    let editor = LineEditor(prompt: "> ", completers: [completer])
+    let result = editor.readLine(driver: vt)
+
+    #expect(result == "@main.swift")
+    // The cursor must never have gone above row 5 (the content start)
+    #expect(!vt.cursorWentNegative, "Cursor moved above content area — would overwrite welcome banner")
+  }
+
+  @Test("multiple completion cycles stay within content area")
+  func completionCyclesStayInBounds() {
+    // Type "@", cycle through completions multiple times, then escape and submit
+    let vt = VirtualTerminalDriver(keys: [
+      .char("@"),
+      .down, .down, .up, .up, .down,  // cycle around
+      .escape,                         // dismiss completions
+      .enter,                          // submit "@"
+    ])
+    vt.setCursorRow(3)
+
+    let completer = StubFileCompleter(files: ["a.swift", "b.swift", "c.swift", "d.swift"])
+    let editor = LineEditor(prompt: "> ", completers: [completer])
+    _ = editor.readLine(driver: vt)
+
+    #expect(!vt.cursorWentNegative, "Cursor escaped content area during completion cycling")
+    // All moveUp values should be reasonable (never exceed content rows)
+    for move in vt.moveUpHistory {
+      #expect(move <= 10, "Excessive moveUp(\(move)) — likely overshoot")
+    }
+  }
+
+  @Test("completions render below prompt and are cleared on dismiss")
+  func completionsRenderAndClear() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("@"),
+      .down,       // select first
+      .escape,     // dismiss completions
+      .backspace,  // remove @
+      .char("x"),
+      .enter,
+    ], screenWidth: 40)
+    vt.setCursorRow(2)
+
+    let completer = StubFileCompleter(files: ["File.swift", "Other.swift"])
+    let editor = LineEditor(prompt: "> ", completers: [completer])
+    let result = editor.readLine(driver: vt)
+
+    #expect(result == "x")
+    #expect(!vt.cursorWentNegative)
+  }
+
+  @Test("prompt with text and completions: cursor tracks correctly")
+  func textBeforeAtCompletion() {
+    // "fix @" — text before the @ trigger
+    let vt = VirtualTerminalDriver(keys: [
+      .char("f"), .char("i"), .char("x"), .char(" "), .char("@"),
+      .down,   // select first
+      .tab,    // accept
+      .enter,
+    ])
+    vt.setCursorRow(4)
+
+    let completer = StubFileCompleter(files: ["main.swift"])
+    let editor = LineEditor(prompt: "> ", completers: [completer])
+    let result = editor.readLine(driver: vt)
+
+    #expect(result == "fix @main.swift")
+    #expect(!vt.cursorWentNegative)
   }
 }

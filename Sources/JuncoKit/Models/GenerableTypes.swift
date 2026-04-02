@@ -257,6 +257,9 @@ public struct SearchQueries: Codable, Sendable {
   public var queries: [String]
   /// Specific files or glob patterns to check (e.g., "Package.swift").
   public var fileHints: [String]
+  /// What kind of search: definition, reference, count, structural, or text.
+  @Guide(description: "definition, reference, count, structural, or text")
+  public var queryType: String
 }
 
 /// Plan Mode: structured plan with generic sections.

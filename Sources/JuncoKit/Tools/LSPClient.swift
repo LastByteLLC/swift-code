@@ -180,6 +180,64 @@ public actor LSPClient {
     return nil
   }
 
+  /// Search for symbols across the workspace by name (fuzzy match).
+  /// Returns matching symbols with their location and kind.
+  public func workspaceSymbol(query: String) async -> [(name: String, kind: String, file: String, line: Int)] {
+    guard initialized else { return [] }
+
+    guard let resultData = await sendRequest(method: "workspace/symbol", params: [
+      "query": query,
+    ] as [String: Any]) else { return [] }
+
+    // Result is SymbolInformation[]
+    guard let symbols = resultData["result"] as? [[String: Any]] ?? (
+      // Some LSP servers return array directly
+      try? JSONSerialization.jsonObject(with: resultData.values.first as? Data ?? Data()) as? [[String: Any]]
+    ) else {
+      // Try parsing resultData itself as array (it may be the unwrapped result)
+      return parseSymbolArray(resultData)
+    }
+
+    return symbols.compactMap { parseSymbolInfo($0) }
+  }
+
+  private func parseSymbolArray(_ obj: [String: Any]) -> [(name: String, kind: String, file: String, line: Int)] {
+    // The sendRequest already extracts "result" — try parsing as array items
+    // If it's a single symbol, wrap it
+    if let name = obj["name"] as? String {
+      if let parsed = parseSymbolInfo(obj) { return [parsed] }
+    }
+    return []
+  }
+
+  private func parseSymbolInfo(_ info: [String: Any]) -> (name: String, kind: String, file: String, line: Int)? {
+    guard let name = info["name"] as? String,
+          let location = info["location"] as? [String: Any],
+          let uri = location["uri"] as? String,
+          let range = location["range"] as? [String: Any],
+          let start = range["start"] as? [String: Any],
+          let line = start["line"] as? Int
+    else { return nil }
+
+    let kind = symbolKindName(info["kind"] as? Int ?? 0)
+    let file = uri.replacingOccurrences(of: "file://", with: "")
+      .replacingOccurrences(of: workingDirectory + "/", with: "")
+    return (name: name, kind: kind, file: file, line: line + 1)
+  }
+
+  private func symbolKindName(_ kind: Int) -> String {
+    switch kind {
+    case 5: return "class"
+    case 6: return "method"
+    case 11: return "interface"  // protocol
+    case 12: return "function"
+    case 13: return "variable"
+    case 23: return "struct"
+    case 25: return "enum"
+    default: return "symbol"
+    }
+  }
+
   // MARK: - JSON-RPC Communication
 
   private func sendRequest(method: String, params: [String: Any]) async -> [String: Any]? {

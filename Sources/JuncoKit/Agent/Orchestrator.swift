@@ -548,19 +548,48 @@ public actor Orchestrator {
     let query = memory.query
     debug("SEARCH MODE → \(query)")
 
-    // Step 1: Generate search queries via LLM
+    // Step 1: LLM generates search terms + query type (1 call)
     let fileList = files.listFiles().prefix(25).joined(separator: "\n")
     let sqPrompt = Prompts.searchQueryPrompt(query: query, fileHints: fileList)
     memory.trackCall(estimatedTokens: 600)
     let searchQueries = try await adapter.generateStructured(
       prompt: sqPrompt, system: Prompts.searchQuerySystem, as: SearchQueries.self
     )
-    debug("SEARCH queries: \(searchQueries.queries) | files: \(searchQueries.fileHints)")
+    let queryType = searchQueries.queryType.lowercased()
+    debug("SEARCH type:\(queryType) queries:\(searchQueries.queries) files:\(searchQueries.fileHints)")
 
-    // Step 2: Execute searches (deterministic, no LLM)
+    // Step 2: Multi-strategy deterministic search (0 LLM calls)
     var hits: [SearchHit] = []
 
-    // 2a: grep/rg for each LLM-generated query term
+    // 2a: Counting queries — answer deterministically via shell
+    if queryType == "count" {
+      let countResult = await executeCountQuery(query: query, terms: searchQueries.queries)
+      if !countResult.isEmpty {
+        let reflection = AgentReflection(
+          taskSummary: "Search: \(query)",
+          insight: countResult,
+          improvement: "", succeeded: true
+        )
+        metrics.tasksCompleted += 1
+        return RunResult(memory: memory, reflection: reflection)
+      }
+    }
+
+    // 2b: LSP workspace/symbol search (highest precision for definition queries)
+    if queryType == "definition" && lspStarted {
+      for term in searchQueries.queries.prefix(3) {
+        let symbols = await lspClient.workspaceSymbol(query: term)
+        for sym in symbols {
+          hits.append(SearchHit(
+            file: sym.file, line: sym.line,
+            snippet: "\(sym.kind) \(sym.name)",
+            source: "lsp", score: 5.0  // LSP results are highest quality
+          ))
+        }
+      }
+    }
+
+    // 2c: grep/rg for each LLM-generated term
     for term in searchQueries.queries.prefix(5) {
       let escaped = shellEscape(term)
       let cmd: String
@@ -578,10 +607,9 @@ public actor Orchestrator {
       }
     }
 
-    // 2b: Read file hints directly (LLM-suggested filenames + well-known files)
-    // Read generously — budget packing in step 4 handles truncation intelligently.
-    let allFileHints = searchQueries.fileHints + Self.wellKnownFiles(for: domain)
-    for fileHint in Set(allFileHints).prefix(5) {
+    // 2d: Read LLM-suggested file hints (high score — these are targeted)
+    let llmFileHints = Set(searchQueries.fileHints)
+    for fileHint in llmFileHints.prefix(3) {
       let matched = files.listFiles().filter {
         $0.lowercased().contains(fileHint.lowercased()) ||
         ($0 as NSString).lastPathComponent.lowercased() == fileHint.lowercased()
@@ -591,85 +619,152 @@ public actor Orchestrator {
           hits.append(SearchHit(
             file: file, line: 1,
             snippet: content,
-            source: "file", score: 3.0
+            source: "file", score: 4.0  // LLM-targeted file reads score highest
           ))
         }
       }
     }
 
-    // 2c: RAG symbol search (both LLM terms and original query)
-    // Query the index directly for matching entries with real file paths.
+    // 2e: Well-known project files as fallback (low score — safety net only)
+    if hits.isEmpty {
+      for file in Self.wellKnownFiles(for: domain) {
+        if files.exists(file), let content = try? files.read(path: file, maxTokens: 2000) {
+          hits.append(SearchHit(
+            file: file, line: 1,
+            snippet: content,
+            source: "file", score: 0.5  // Low score — only used if nothing else found
+          ))
+        }
+      }
+    }
+
+    // 2f: RAG index search — symbol name matches score higher than snippet matches
     let ragQueries = Set(searchQueries.queries + [query])
-    var seenRAGFiles: Set<String> = []
+    var seenRAGKeys: Set<String> = []
     for term in ragQueries.prefix(5) {
       let termLower = term.lowercased()
-      for entry in projectIndex where !seenRAGFiles.contains(entry.filePath) {
-        let name = entry.symbolName.lowercased()
-        let path = entry.filePath.lowercased()
-        if name.contains(termLower) || path.contains(termLower) ||
-           entry.snippet.lowercased().contains(termLower) {
-          seenRAGFiles.insert(entry.filePath)
+      for entry in projectIndex {
+        let key = "\(entry.filePath):\(entry.lineNumber)"
+        guard !seenRAGKeys.contains(key) else { continue }
+
+        let nameMatch = entry.symbolName.lowercased().contains(termLower)
+        let snippetMatch = !nameMatch && entry.snippet.lowercased().contains(termLower)
+
+        // Skip file-level entries (line 1, kind .file) for snippet-only matches —
+        // they match too broadly and add noise.
+        if snippetMatch && entry.kind == .file { continue }
+
+        if nameMatch || snippetMatch {
+          seenRAGKeys.insert(key)
+          let score: Double = nameMatch ? 2.5 : 1.0  // Symbol name match >> snippet match
           hits.append(SearchHit(
             file: entry.filePath, line: entry.lineNumber,
             snippet: entry.snippet,
-            source: "rag", score: 1.5
+            source: "rag", score: score
           ))
         }
       }
     }
 
-    // Step 3: Rank and deduplicate
+    // Step 3: Rank, deduplicate, and format deterministically (0 LLM calls)
     let ranked = rankAndDeduplicate(hits)
-    debug("SEARCH → \(ranked.count) hits")
+    debug("SEARCH → \(ranked.count) hits from \(Set(hits.map(\.source)).sorted())")
 
-    // Step 4: Synthesize answer via LLM (plain text — no @Generable overhead)
     if ranked.isEmpty {
       let reflection = AgentReflection(
         taskSummary: "Search: \(query)",
-        insight: "No results found for this query. Try rephrasing or using different terms.",
+        insight: "No results found. Try rephrasing or being more specific.",
         improvement: "", succeeded: false
       )
       metrics.tasksCompleted += 1
       return RunResult(memory: memory, reflection: reflection)
     }
 
-    // Pack search results into token budget — high-scoring hits get more space.
-    // The LLM sees as much relevant content as will fit, not an arbitrary slice.
-    let systemTokens = TokenBudget.estimate(Prompts.searchSynthesizeSystem)
-    let queryTokens = TokenBudget.estimate(query) + 30  // "Question: " overhead
-    let synthesizeBudget = TokenBudget.contextWindow - systemTokens - queryTokens - 800  // reserve 800 for generation
-    let packedHits = packSearchHits(ranked, budget: max(200, synthesizeBudget))
+    // Format results deterministically — the answer IS the search results
+    let formattedResults = formatSearchResults(ranked.prefix(8), query: query)
 
-    // Build project context line for grounding
-    let projectCtx = "Swift/SPM project at \(workingDirectory.split(separator: "/").last ?? ".")" +
-      " — main target: Sources/junco/, library: Sources/JuncoKit/, tests: Tests/JuncoTests/"
+    // Step 4: Optional one-sentence LLM summary (only for interpretive queries)
+    // Definition/reference queries don't need interpretation — results speak for themselves.
+    let needsSummary = ["text", "structural", "reference"].contains(queryType)
+    var insight = ""
 
-    // Build a raw results summary (always shown, regardless of synthesis quality)
-    let topHits = ranked.prefix(5)
-    let rawSummary = topHits.map { hit in
-      hit.line > 0 ? "  \(hit.file):\(hit.line) — \(String(hit.snippet.prefix(80)))" : "  \(hit.file)"
-    }.joined(separator: "\n")
+    if needsSummary && ranked.count > 1 {
+      let summaryHits = ranked.prefix(3).map { "\($0.file):\($0.line) \($0.snippet.prefix(60))" }.joined(separator: "\n")
+      memory.trackCall(estimatedTokens: 300)
+      let summary = try await adapter.generate(
+        prompt: "Question: \(query)\nTop results:\n\(summaryHits)\nAnswer in one sentence.",
+        system: "Summarize these search results in one sentence. Be specific — name files and line numbers."
+      )
+      insight = summary + "\n\n"
+    }
 
-    memory.trackCall(estimatedTokens: TokenBudget.contextWindow)
-    let synthesis = try await adapter.generate(
-      prompt: Prompts.searchSynthesizePrompt(query: query, hits: packedHits, projectContext: projectCtx),
-      system: Prompts.searchSynthesizeSystem
-    )
-
-    // Combine: LLM synthesis first, then raw hit locations as reference
-    let insight = synthesis + "\n\nLocations found:\n" + rawSummary
+    insight += formattedResults
 
     let reflection = AgentReflection(
       taskSummary: "Search: \(query)",
       insight: insight,
-      improvement: "",
-      succeeded: true
+      improvement: "", succeeded: true
     )
 
     metrics.tasksCompleted += 1
     metrics.totalTokensUsed += memory.totalTokensUsed
     metrics.totalLLMCalls += memory.llmCalls
     return RunResult(memory: memory, reflection: reflection)
+  }
+
+  /// Execute a counting query deterministically via shell commands.
+  private func executeCountQuery(query: String, terms: [String]) async -> String {
+    let lower = query.lowercased()
+
+    if lower.contains("file") {
+      // Count Swift source files
+      let cmd = "find Sources Tests -name '*.swift' 2>/dev/null | wc -l"
+      if let result = try? await shell.execute(cmd), result.exitCode == 0 {
+        let count = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "There are \(count) Swift source files in Sources/ and Tests/."
+      }
+    }
+
+    if lower.contains("test") {
+      let cmd = "grep -r '@Test' Tests/ --include='*.swift' 2>/dev/null | wc -l"
+      if let result = try? await shell.execute(cmd), result.exitCode == 0 {
+        let count = result.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        return "There are \(count) test cases (marked with @Test) in Tests/."
+      }
+    }
+
+    if lower.contains("function") || lower.contains("method") {
+      let funcCount = projectIndex.filter { $0.kind == .function }.count
+      return "There are \(funcCount) functions/methods in the project index."
+    }
+
+    if lower.contains("type") || lower.contains("struct") || lower.contains("class") {
+      let typeCount = projectIndex.filter { $0.kind == .type }.count
+      return "There are \(typeCount) types (structs, classes, enums, actors, protocols) in the project index."
+    }
+
+    return ""  // Not a recognized counting query
+  }
+
+  /// Format search results deterministically — the answer IS the results.
+  private func formatSearchResults(_ hits: some Collection<SearchHit>, query: String) -> String {
+    var output = "Found in \(hits.count) location(s):\n"
+
+    for hit in hits {
+      output += "\n  \(hit.file)"
+      if hit.line > 0 { output += ":\(hit.line)" }
+      output += "\n"
+
+      // Show relevant snippet lines (up to 4)
+      let snippetLines = hit.snippet.components(separatedBy: "\n")
+        .map { $0.trimmingCharacters(in: .init(charactersIn: "\r")) }
+        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+      for line in snippetLines.prefix(4) {
+        output += "    \(line)\n"
+      }
+    }
+
+    return output
   }
 
   /// Parse a grep/rg output line into a SearchHit.
@@ -696,39 +791,6 @@ public actor Orchestrator {
     return unique
   }
 
-  /// Pack search hits into a token budget, giving higher-scoring hits more space.
-  /// No arbitrary char limits — the budget determines how much of each hit is shown.
-  private func packSearchHits(_ hits: [SearchHit], budget: Int) -> String {
-    guard !hits.isEmpty else { return "(no results)" }
-
-    let sorted = hits.sorted { $0.score > $1.score }
-    var output = ""
-    var used = 0
-
-    for hit in sorted.prefix(10) {
-      let header = hit.line > 0 ? "[\(hit.file):\(hit.line)]" : "[\(hit.file)]"
-      let headerTokens = TokenBudget.estimate(header) + 2  // newline overhead
-
-      let remaining = budget - used - headerTokens
-      guard remaining > 20 else { break }
-
-      // Give each hit its fair share of remaining budget, but let
-      // high-scoring hits use more by not capping below actual content.
-      let snippetTokens = TokenBudget.estimate(hit.snippet)
-      let snippet: String
-      if snippetTokens <= remaining {
-        snippet = hit.snippet
-      } else {
-        snippet = TokenBudget.truncate(hit.snippet, toTokens: remaining)
-      }
-
-      output += "\(header)\n\(snippet)\n\n"
-      used += TokenBudget.estimate(output) - used  // re-measure to be accurate
-    }
-
-    return output
-  }
-
   /// Well-known project files that often contain structural information.
   private static func wellKnownFiles(for domain: DomainConfig) -> [String] {
     var files = ["Package.swift", "README.md"]
@@ -738,16 +800,6 @@ public actor Orchestrator {
     return files
   }
 
-  /// Format search hits for prompt injection.
-  private func formatHits(_ hits: some Collection<SearchHit>) -> String {
-    hits.map { hit in
-      if hit.line > 0 {
-        return "[\(hit.file):\(hit.line)] \(hit.snippet)"
-      } else {
-        return "[\(hit.file)] \(hit.snippet)"
-      }
-    }.joined(separator: "\n")
-  }
 
   // MARK: - Plan Mode
 
@@ -1678,7 +1730,7 @@ public actor Orchestrator {
       }
 
     case .search(let pattern):
-      let cmd = "grep -rn \(shellEscape(pattern)) . --include='*.swift' | head -20"
+      let cmd = "grep -rn \(shellEscape(pattern)) Sources/ Tests/ Package.swift --include='*.swift' 2>/dev/null | head -20"
       let result = try await shell.execute(cmd)
       return result.formatted(maxTokens: Config.toolOutputMaxTokens)
     }

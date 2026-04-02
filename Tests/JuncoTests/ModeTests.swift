@@ -105,7 +105,8 @@ struct ModeTests {
   func searchQueriesCodable() throws {
     let sq = SearchQueries(
       queries: ["targets", "executableTarget"],
-      fileHints: ["Package.swift"]
+      fileHints: ["Package.swift"],
+      queryType: "definition"
     )
     let data = try JSONEncoder().encode(sq)
     let decoded = try JSONDecoder().decode(SearchQueries.self, from: data)

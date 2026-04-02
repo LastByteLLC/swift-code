@@ -84,15 +84,14 @@ public enum Prompts {
 
   public static let searchQuerySystem = """
     You generate search terms for finding code in a Swift/Apple project. \
-    Given a natural language question, produce grep-compatible patterns and filenames. \
-    IMPORTANT: Translate concepts to actual Swift identifiers and filenames: \
+    Translate concepts to actual Swift identifiers and filenames: \
     "build target" → targets, .target(, executableTarget, Package.swift; \
     "authentication" → Auth, login, credential, Keychain; \
-    "network layer" → URLSession, HTTPClient, fetch, request; \
-    "data model" → struct, @Model, CoreData, SwiftData; \
     "entry point" → @main, App.swift, main.swift. \
     Generate 3-5 precise code-level terms, not the user's words. \
-    Always include at least one likely filename in fileHints.
+    Always include at least one likely filename in fileHints. \
+    queryType: definition (where is X defined), reference (who uses X), \
+    count (how many X), structural (find all X of type Y), text (general search).
     """
 
   public static func searchQueryPrompt(query: String, fileHints: String) -> String {

@@ -1147,6 +1147,9 @@ public actor Orchestrator {
 
     let toolOutput = await executeToolSafe(action: action, memory: &memory)
 
+    // Notify CLI for live action log
+    await activeCallbacks.onToolResult?(action.toolLabel, action.targetPath ?? "", toolOutput)
+
     return compressObservation(tool: toolName.rawValue, output: toolOutput, step: step.instruction)
   }
 

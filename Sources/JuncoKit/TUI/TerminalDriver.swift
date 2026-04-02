@@ -16,7 +16,7 @@ import Foundation
 /// A parsed keyboard event.
 public enum Key: Equatable, Sendable {
   case char(Character)
-  case enter, shiftEnter, tab, backspace, delete, escape
+  case enter, shiftEnter, tab, shiftTab, backspace, delete, escape
   case up, down, left, right
   case home, end
   case ctrlC, ctrlD, ctrlU, ctrlW, ctrlL
@@ -116,6 +116,7 @@ public final class TerminalDriver: @unchecked Sendable, TerminalIO {
         case 0x44: return .left
         case 0x48: return .home
         case 0x46: return .end
+        case 0x5A: return .shiftTab  // ESC [ Z = Shift+Tab
         case 0x33:
           _ = readByte() // consume ~
           return .delete

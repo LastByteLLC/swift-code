@@ -228,4 +228,200 @@ struct LineEditorTests {
     #expect(result == "fix @main.swift")
     #expect(!vt.cursorWentNegative)
   }
+
+  // MARK: - Mode Bar Tests
+
+  @Test("mode bar renders during editing and is cleaned on submit")
+  func modeBarRendered() {
+    // Mode bar appears during editing, finalRender cleans it on submit.
+    // Verify: mode bar doesn't corrupt cursor, result is correct,
+    // and no cursor overshoot occurs.
+    let vt = VirtualTerminalDriver(keys: [
+      .char("x"), .enter,
+    ], screenWidth: 60)
+    vt.setCursorRow(3)
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.text == "x")
+    #expect(result.mode == .build)
+    #expect(!vt.cursorWentNegative, "Mode bar caused cursor overshoot")
+  }
+
+  @Test("mode bar hidden when showModeBar is false")
+  func modeBarHidden() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("x"), .enter,
+    ], screenWidth: 60)
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: false)
+    _ = editor.readLineWithMode(driver: vt)
+
+    let rows = vt.visibleRows()
+    let hasModeRow = rows.contains { $0.contains("shift+tab") }
+    #expect(!hasModeRow, "Mode bar should not appear when disabled")
+  }
+
+  @Test("default mode is build")
+  func defaultModeBuild() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("x"), .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.mode == .build)
+    #expect(result.text == "x")
+  }
+
+  @Test("shift+tab cycles to search mode")
+  func shiftTabToSearch() {
+    let vt = VirtualTerminalDriver(keys: [
+      .shiftTab,  // build → search
+      .char("q"),
+      .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.mode == .search)
+    #expect(result.text == "q")
+  }
+
+  @Test("shift+tab cycles through all modes and wraps")
+  func shiftTabFullCycle() {
+    // build → search → plan → research → build
+    let vt = VirtualTerminalDriver(keys: [
+      .shiftTab,  // → search
+      .shiftTab,  // → plan
+      .shiftTab,  // → research
+      .shiftTab,  // → build (wrap)
+      .char("x"),
+      .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.mode == .build, "Full cycle should return to build")
+  }
+
+  @Test("shift+tab to plan mode returns plan")
+  func shiftTabPlanMode() {
+    let vt = VirtualTerminalDriver(keys: [
+      .shiftTab,  // → search
+      .shiftTab,  // → plan
+      .char("x"),
+      .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.mode == .plan)
+    #expect(result.text == "x")
+  }
+
+  @Test("shift+tab preserves typed text")
+  func shiftTabPreservesText() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("h"), .char("i"),
+      .shiftTab,  // cycle mode
+      .char("!"),
+      .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.text == "hi!")
+    #expect(result.mode == .search)
+  }
+
+  @Test("first escape keeps text, second escape clears, typing resumes")
+  func escBehavior() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("h"), .char("i"),
+      .escape,    // first esc — sets escPending (hint rendered transiently)
+      .char("x"), // cancels esc pending, adds character
+      .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    // Text should be "hix" — first esc didn't clear, typing resumed
+    #expect(result.text == "hix")
+  }
+
+  @Test("double escape clears input")
+  func doubleEscClears() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("h"), .char("i"),
+      .escape,    // first esc — hint
+      .escape,    // second esc — clear
+      .enter,     // submit empty → nil
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.text == nil)
+  }
+
+  @Test("mode bar does not cause cursor overshoot with completions")
+  func modeBarWithCompletions() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("@"),
+      .down, .down,
+      .tab,
+      .enter,
+    ], screenWidth: 60)
+    vt.setCursorRow(5)
+
+    let completer = StubFileCompleter(files: ["a.swift", "b.swift", "c.swift"])
+    let editor = LineEditor(prompt: "> ", completers: [completer], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.text == "@b.swift")
+    #expect(!vt.cursorWentNegative, "Mode bar + completions caused cursor overshoot")
+  }
+
+  @Test("shift+tab during completions cycles mode, not completions")
+  func shiftTabDuringCompletions() {
+    let vt = VirtualTerminalDriver(keys: [
+      .char("@"),     // trigger completions
+      .shiftTab,      // should cycle mode, not affect completions
+      .tab,           // accept first completion
+      .enter,
+    ])
+
+    let completer = StubFileCompleter(files: ["main.swift"])
+    let editor = LineEditor(prompt: "> ", completers: [completer], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.mode == .search, "Shift+tab should cycle mode")
+    #expect(result.text == "@main.swift", "Completion should still work")
+  }
+
+  @Test("readLine backward compat returns string not result")
+  func readLineBackwardCompat() {
+    let vt = VirtualTerminalDriver(keys: [
+      .shiftTab,  // cycle to search
+      .char("x"),
+      .enter,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    // readLine() returns String?, not LineEditorResult
+    let text: String? = editor.readLine(driver: vt)
+    #expect(text == "x")
+  }
+
+  @Test("ctrlC preserves current mode in result")
+  func ctrlCPreservesMode() {
+    let vt = VirtualTerminalDriver(keys: [
+      .shiftTab,  // → search
+      .shiftTab,  // → plan
+      .ctrlC,
+    ])
+    let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
+    let result = editor.readLineWithMode(driver: vt)
+
+    #expect(result.text == nil)
+    #expect(result.mode == .plan, "Mode should be preserved on cancel")
+  }
 }

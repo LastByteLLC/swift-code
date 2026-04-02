@@ -96,21 +96,34 @@ public struct CommandCompleter: CompletionProvider {
 
 // MARK: - Line Editor
 
-/// Interactive line editor with completion dropdown and command history.
+/// Result from the line editor including text and selected mode.
+public struct LineEditorResult: Sendable {
+  public let text: String?
+  public let mode: AgentMode
+}
+
+/// Interactive line editor with completion dropdown, command history, and mode selection.
 public struct LineEditor: Sendable {
   private let prompt: String
   private let promptWidth: Int
   private let completers: [any CompletionProvider]
+  private let showModeBar: Bool
 
-  public init(prompt: String, completers: [any CompletionProvider]) {
+  public init(prompt: String, completers: [any CompletionProvider], showModeBar: Bool = true) {
     self.prompt = prompt
     self.promptWidth = TerminalDriver.visibleWidth(prompt)
     self.completers = completers
+    self.showModeBar = showModeBar
   }
 
   /// Read a line interactively. Returns submitted text, or nil on cancel/EOF.
   /// Pass a CommandHistory to enable up/down arrow history navigation.
   public func readLine(driver: any TerminalIO, history: CommandHistory? = nil) -> String? {
+    readLineWithMode(driver: driver, history: history).text
+  }
+
+  /// Read a line with mode selection. Returns text and chosen mode.
+  public func readLineWithMode(driver: any TerminalIO, history: CommandHistory? = nil) -> LineEditorResult {
     var buf: [Character] = []
     var cur = 0
     var completions: [Completion] = []
@@ -118,8 +131,9 @@ public struct LineEditor: Sendable {
     var historyNav = history.map { HistoryNavigator(history: $0) }
     var prevLines = 1  // tracks how many terminal rows our content spans
     var escPending = false  // true after first Esc press
+    var mode: AgentMode = .build
 
-    render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
+    render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending, mode: mode)
 
     while true {
       let key = driver.readKey()
@@ -165,22 +179,22 @@ public struct LineEditor: Sendable {
       // --- Cursor movement ---
       case .left:
         if cur > 0 { cur -= 1 }
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending, mode: mode)
         continue
 
       case .right:
         if cur < buf.count { cur += 1 }
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending, mode: mode)
         continue
 
       case .home:
         cur = 0
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending, mode: mode)
         continue
 
       case .end:
         cur = buf.count
-        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
+        render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending, mode: mode)
         continue
 
       // --- Up/Down: completions take priority, then history ---
@@ -215,6 +229,13 @@ public struct LineEditor: Sendable {
           sel = -1
         }
 
+      // --- Mode cycling (Shift+Tab) ---
+      case .shiftTab:
+        let allModes = AgentMode.allCases
+        if let idx = allModes.firstIndex(of: mode) {
+          mode = allModes[(idx + 1) % allModes.count]
+        }
+
       case .escape:
         completions = []
         sel = -1
@@ -243,28 +264,29 @@ public struct LineEditor: Sendable {
         } else {
           finalRender(driver: driver, buffer: buf, prevLines: prevLines)
           historyNav?.reset()
-          return buf.isEmpty ? nil : String(buf)
+          let text = buf.isEmpty ? nil : String(buf)
+          return LineEditorResult(text: text, mode: mode)
         }
 
       // --- Cancel ---
       case .ctrlC:
         finalRender(driver: driver, buffer: buf, prevLines: prevLines)
-        return nil
+        return LineEditorResult(text: nil, mode: mode)
 
       case .ctrlD:
         if buf.isEmpty {
           finalRender(driver: driver, buffer: buf, prevLines: prevLines)
-          return nil
+          return LineEditorResult(text: nil, mode: mode)
         }
 
       case .ctrlL, .eof:
-        if key == .eof { return nil }
+        if key == .eof { return LineEditorResult(text: nil, mode: mode) }
 
       case .unknown:
         continue
       }
 
-      render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending)
+      render(driver: driver, buffer: buf, cursor: cur, completions: completions, selected: sel, prevLines: &prevLines, escHint: escPending, mode: mode)
     }
   }
 
@@ -299,7 +321,8 @@ public struct LineEditor: Sendable {
     completions: [Completion],
     selected: Int,
     prevLines: inout Int,
-    escHint: Bool = false
+    escHint: Bool = false,
+    mode: AgentMode = .build
   ) {
     let width = max(driver.screenWidth, 20)
     let escSuffix = escHint ? "  " + TerminalDriver.dim("Esc again to clear") : ""
@@ -322,6 +345,16 @@ public struct LineEditor: Sendable {
     }
     driver.write(escSuffix)
 
+    // Mode bar (below prompt, above completions)
+    var extraRows = 0
+    if showModeBar {
+      driver.newline()
+      let modeLabel = "\(mode.icon) \(mode.rawValue.capitalized)"
+      let hints = TerminalDriver.dim("(shift+tab to cycle) · esc to interrupt")
+      driver.write(modeLabel + " · " + hints)
+      extraRows += 1
+    }
+
     // Completions dropdown
     if !completions.isEmpty {
       for (i, c) in completions.enumerated() {
@@ -333,6 +366,11 @@ public struct LineEditor: Sendable {
         }
       }
       driver.moveUp(completions.count)
+    }
+
+    // Move back up past mode bar
+    if extraRows > 0 {
+      driver.moveUp(extraRows)
     }
 
     // Position cursor at the correct row+col within the content area

@@ -237,9 +237,12 @@ struct Junco: AsyncParsableCommand {
       Terminal.line(topBorder)
 
       let line: String?
+      var userMode: AgentMode = .build
       if let editor, let driver {
         driver.enableRawMode()
-        line = editor.readLine(driver: driver, history: history)
+        let result = editor.readLineWithMode(driver: driver, history: history)
+        line = result.text
+        userMode = result.mode
         driver.restoreMode()
       } else {
         print(promptStr, terminator: "")
@@ -284,7 +287,7 @@ struct Junco: AsyncParsableCommand {
         markdown: markdown, diffRenderer: diffRenderer,
         sessionStart: sessionStart, history: history,
         persistedSession: &persistedSession, phrases: phrases,
-        translator: translator
+        modeOverride: userMode, translator: translator
       )
 
       // Check for idle background tasks after each query
@@ -306,6 +309,7 @@ struct Junco: AsyncParsableCommand {
     history: CommandHistory,
     persistedSession: inout PersistedSession,
     phrases: ThinkingPhrases = ThinkingPhrases(),
+    modeOverride: AgentMode = .build,
     translator: TranslationService? = nil
   ) async throws {
     let taskStart = Date()
@@ -313,7 +317,8 @@ struct Junco: AsyncParsableCommand {
 
     // Single spinner — starts immediately, lives for the entire query lifecycle
     let spinner = Spinner(phrases: phrases)
-    await spinner.start(stage: "classify")
+    await spinner.setMode(modeOverride)
+    await spinner.start(stage: "\(modeOverride.rawValue)-mode")
 
     // Parse input (fast, synchronous)
     let parser = InputParser(workingDirectory: cwd)
@@ -364,9 +369,13 @@ struct Junco: AsyncParsableCommand {
 
     // Build pipeline callbacks — all user I/O happens here in the CLI layer,
     // never inside the orchestrator actor (which would corrupt terminal state).
+    let log = ActionLog()
     let callbacks = PipelineCallbacks(
-      onProgress: { [spinner] step, total, description in
-        await spinner.update(stage: "execute", detail: "[\(step)/\(total)] \(description)")
+      onProgress: { [spinner, log] step, total, description in
+        await spinner.stop()
+        log.stepStart(step, total: total, instruction: description)
+        await spinner.start(stage: "execute")
+        await spinner.update(detail: "[\(step)/\(total)] \(description)")
       },
       onStepError: { [spinner] step, error in
         await spinner.stop()
@@ -420,10 +429,36 @@ struct Junco: AsyncParsableCommand {
         let count = wordCounter.count
         await spinner.update(detail: "\(count) words")
       },
-      onMode: { [spinner] mode in
+      onMode: { [spinner, log] mode in
+        await spinner.stop()
+        log.classified(mode: mode, taskType: mode.rawValue, targets: [])
         await spinner.setMode(mode)
-        let stageName = "\(mode.rawValue)-mode"
-        await spinner.update(stage: stageName)
+        await spinner.start(stage: "\(mode.rawValue)-mode")
+      },
+      onToolResult: { [spinner, log] tool, target, output in
+        await spinner.stop()
+        switch tool {
+        case "bash":
+          log.bash(target.isEmpty ? output.prefix(80).description : target)
+          if !output.isEmpty { log.bashOutput(output) }
+        case "read":
+          log.read(target)
+        case "create":
+          log.create(target, chars: output.count)
+        case "write":
+          log.write(target, chars: output.count)
+        case "edit":
+          log.action("\(Style.bold("Edit")) \(Style.cyan(target))")
+          if !output.isEmpty { log.output(output) }
+        case "patch":
+          log.patch(target)
+        case "search":
+          log.action("\(Style.bold("Search")) \(Style.dim(target))")
+          if !output.isEmpty { log.output(output) }
+        default:
+          log.action("\(tool) \(target)")
+        }
+        await spinner.start(stage: "execute")
       }
     )
 
@@ -724,28 +759,11 @@ struct Junco: AsyncParsableCommand {
     let mem = result.memory
     let ref = result.reflection
     let insight = translatedInsight ?? ref.insight
+    let log = ActionLog()
 
-    // Plan
-    if let plan = mem.plan {
-      Terminal.header("Plan (\(plan.steps.count) steps)")
-      for (_, step) in plan.steps.enumerated() {
-        Terminal.line("  [\(Style.green("+"))] \(step.instruction)")
-      }
-    }
-
-    // Observations
-    if !mem.observations.isEmpty {
-      Terminal.header("Results")
-      for obs in mem.observations {
-        let icon = obs.outcome == .ok ? Style.ok : Style.err
-        Terminal.line("  [\(icon)] \(Style.dim(obs.tool)): \(obs.keyFact)")
-      }
-    }
-
-    // Diffs
+    // Diffs (compact, already logged live for individual edits)
     let diffs = await orchestrator.lastDiffs
     if !diffs.isEmpty {
-      Terminal.header("Changes")
       for diff in diffs {
         Terminal.line(diffRenderer.render(diff))
       }
@@ -753,11 +771,11 @@ struct Junco: AsyncParsableCommand {
 
     // Build verification
     if let buildResult = await orchestrator.lastBuildResult {
-      Terminal.header("Build")
-      Terminal.line(buildResult)
+      log.output(buildResult)
     }
 
-    // Response (rendered as markdown, possibly translated)
+    // Response
+    Terminal.line("")
     if ref.succeeded {
       Terminal.line(Style.green("Done: ") + markdown.render(insight))
     } else {
@@ -767,9 +785,12 @@ struct Junco: AsyncParsableCommand {
       Terminal.line(Style.dim("  Learned: \(ref.improvement)"))
     }
 
-    Terminal.line(Style.dim(
-      "[\(mem.llmCalls) calls | ~\(mem.totalTokensUsed) tokens | \(mem.touchedFiles.count) files]"
-    ))
+    log.done(
+      succeeded: ref.succeeded,
+      calls: mem.llmCalls,
+      tokens: mem.totalTokensUsed,
+      files: mem.touchedFiles.count
+    )
   }
 
   private func printSessionSummary(orchestrator: Orchestrator, sessionStart: Date) async {

@@ -36,6 +36,10 @@ public typealias StreamHandler = @Sendable (String) async -> Void
 /// Called when the agent mode is detected (after classify).
 public typealias ModeHandler = @Sendable (AgentMode) async -> Void
 
+/// Called after each tool executes with the action and its output.
+/// Parameters: (toolLabel, target, output)
+public typealias ToolResultHandler = @Sendable (String, String, String) async -> Void
+
 /// All pipeline callbacks bundled together.
 public struct PipelineCallbacks: Sendable {
   public let onProgress: ProgressHandler?
@@ -43,19 +47,22 @@ public struct PipelineCallbacks: Sendable {
   public let onPermission: PermissionHandler?
   public let onStream: StreamHandler?
   public let onMode: ModeHandler?
+  public let onToolResult: ToolResultHandler?
 
   public init(
     onProgress: ProgressHandler? = nil,
     onStepError: ErrorRecoveryHandler? = nil,
     onPermission: PermissionHandler? = nil,
     onStream: StreamHandler? = nil,
-    onMode: ModeHandler? = nil
+    onMode: ModeHandler? = nil,
+    onToolResult: ToolResultHandler? = nil
   ) {
     self.onProgress = onProgress
     self.onStepError = onStepError
     self.onPermission = onPermission
     self.onStream = onStream
     self.onMode = onMode
+    self.onToolResult = onToolResult
   }
 
   /// Default callbacks: auto-allow permissions, skip errors, no progress.

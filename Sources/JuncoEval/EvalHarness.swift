@@ -152,6 +152,113 @@ struct EvalHarness {
         "Should mention Sources/ directory",
       ]
     ),
+
+    // --- Identifier queries (deterministic search should nail these) ---
+
+    EvalCase(
+      name: "search-identifier-orchestrator",
+      query: "Where is the Orchestrator class defined?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find Sources/JuncoKit/Agent/Orchestrator.swift",
+        "Should show the actor declaration",
+      ]
+    ),
+    EvalCase(
+      name: "search-identifier-tokenbudget",
+      query: "Where is TokenBudget defined?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find Sources/JuncoKit/Models/TokenBudget.swift",
+        "Should show the enum declaration",
+      ]
+    ),
+    EvalCase(
+      name: "search-identifier-safeshell",
+      query: "Find SafeShell",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find Sources/JuncoKit/Tools/SafeShell.swift",
+      ]
+    ),
+
+    // --- Concept queries (need LLM fallback) ---
+
+    EvalCase(
+      name: "search-concept-entry-point",
+      query: "What is the main entry point of this app?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find Sources/junco/Junco.swift",
+        "Should mention @main or the Junco struct",
+      ]
+    ),
+    EvalCase(
+      name: "search-concept-dependencies",
+      query: "What external dependencies does this project use?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should mention swift-argument-parser",
+        "Should reference Package.swift",
+      ]
+    ),
+
+    // --- Adversarial mode detection ---
+
+    EvalCase(
+      name: "search-adversarial-build",
+      query: "Where is the build verification logic?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should be classified as search, not build",
+        "Should find BuildRunner.swift",
+      ]
+    ),
+    EvalCase(
+      name: "search-adversarial-fix",
+      query: "Where are validation errors fixed in the pipeline?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should be classified as search, not build",
+        "Should find validateAndFix or validation retry logic",
+      ]
+    ),
+
+    // --- Counting ---
+
+    EvalCase(
+      name: "search-count-tests",
+      query: "How many test cases are there?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should give a concrete number",
+        "Should mention @Test or Tests/ directory",
+      ]
+    ),
   ]
 
   static let destructiveCases: [EvalCase] = [

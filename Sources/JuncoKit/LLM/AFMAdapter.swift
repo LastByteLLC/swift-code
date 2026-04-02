@@ -28,6 +28,23 @@ public actor AFMAdapter: LLMAdapter {
   /// Whether a LoRA adapter is currently loaded.
   public var hasAdapter: Bool { loraAdapter != nil }
 
+  // MARK: - Pre-warming
+
+  /// Pre-warm the model to reduce first-call latency.
+  /// Call this during startup (e.g., while showing the welcome message)
+  /// so the Neural Engine is loaded before the first query.
+  public func prewarm() async {
+    let session = makeSession(system: nil)
+    session.prewarm()
+  }
+
+  /// Pre-warm with a system prompt for even faster first response.
+  /// Use this when you know the system prompt that will be used.
+  public func prewarm(systemPrompt: String) async {
+    let session = makeSession(system: systemPrompt)
+    session.prewarm()
+  }
+
   // MARK: - Session factory
 
   private func makeSession(system: String?) -> LanguageModelSession {

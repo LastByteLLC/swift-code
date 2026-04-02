@@ -17,7 +17,8 @@ let package = Package(
     .target(
       name: "JuncoKit",
       dependencies: [],
-      path: "Sources/JuncoKit"
+      path: "Sources/JuncoKit",
+      exclude: ["Resources"]
     ),
     .executableTarget(
       name: "junco",

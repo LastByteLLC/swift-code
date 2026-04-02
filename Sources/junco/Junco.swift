@@ -196,6 +196,12 @@ struct Junco: AsyncParsableCommand {
     )
     print(welcome.render(width: Terminal.terminalWidth()))
 
+    // Pre-warm the Neural Engine while the user reads the welcome message.
+    // This loads model resources so the first query responds faster.
+    Task.detached(priority: .background) {
+      await afm.prewarm(systemPrompt: Prompts.classifySystem)
+    }
+
     // Resume session prompt
     if let existing = persistence.load(), !existing.turns.isEmpty {
       Terminal.line(Style.dim("Previous session: \(existing.turns.count) turns. Resuming context."))

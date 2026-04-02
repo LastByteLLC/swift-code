@@ -540,6 +540,51 @@ public actor Orchestrator {
     return _hasRg!
   }
 
+  // MARK: - Search Term Extraction
+
+  /// Extract search terms from a natural language query.
+  /// Returns (identifiers, keywords) — identifiers are CamelCase/@ symbols,
+  /// keywords are remaining significant words.
+  /// Uses NLTK stop word list (loaded from Resources/stopwords.txt).
+  private static func extractSearchTerms(_ query: String) -> (identifiers: [String], keywords: [String]) {
+    let words = query.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: "@_")).inverted)
+      .filter { !$0.isEmpty }
+
+    var identifiers: [String] = []
+    var keywords: [String] = []
+
+    for word in words {
+      if StopWords.contains(word) { continue }
+
+      // CamelCase or @-prefixed → code identifier (highest value)
+      if word.first?.isUppercase == true || word.hasPrefix("@") {
+        identifiers.append(word)
+      } else if word.count >= 3 {
+        keywords.append(word)
+      }
+    }
+
+    return (identifiers, keywords)
+  }
+
+  /// Detect if a query is asking for a count. Returns true for "how many X" style queries.
+  private static func isCountQuery(_ query: String) -> Bool {
+    let lower = query.lowercased()
+    // Look for quantity question patterns — not phrase matching on the full query,
+    // just checking if quantity words co-occur with question structure.
+    let hasQuantityWord = ["many", "count", "number", "total"].contains(where: { lower.contains($0) })
+    let hasQuestionWord = ["how", "what"].contains(where: { lower.hasPrefix($0) })
+    return hasQuantityWord && hasQuestionWord
+  }
+
+  /// Detect if a query is interpretive (needs LLM summary) vs locational (results speak for themselves).
+  private static func isInterpretiveQuery(_ query: String) -> Bool {
+    let lower = query.lowercased()
+    return lower.hasPrefix("how do") || lower.hasPrefix("how does") ||
+           lower.hasPrefix("how are") || lower.hasPrefix("why") ||
+           lower.hasPrefix("explain")
+  }
+
   private func runSearch(
     memory: inout WorkingMemory,
     explicitContext: String,
@@ -548,22 +593,18 @@ public actor Orchestrator {
     let query = memory.query
     debug("SEARCH MODE → \(query)")
 
-    // Step 1: LLM generates search terms + query type (1 call)
-    let fileList = files.listFiles().prefix(25).joined(separator: "\n")
-    let sqPrompt = Prompts.searchQueryPrompt(query: query, fileHints: fileList)
-    memory.trackCall(estimatedTokens: 600)
-    let searchQueries = try await adapter.generateStructured(
-      prompt: sqPrompt, system: Prompts.searchQuerySystem, as: SearchQueries.self
-    )
-    let queryType = searchQueries.queryType.lowercased()
-    debug("SEARCH type:\(queryType) queries:\(searchQueries.queries) files:\(searchQueries.fileHints)")
+    // === FULLY DETERMINISTIC SEARCH — NO LLM FOR QUERY EXPANSION ===
+    // The user's actual words are the best search terms.
+    // LLM query expansion is unreliable with a 3B model.
 
-    // Step 2: Multi-strategy deterministic search (0 LLM calls)
-    var hits: [SearchHit] = []
+    // Step 1: Extract search terms from the query (deterministic, instant)
+    let (identifiers, keywords) = Self.extractSearchTerms(query)
+    let allTerms = identifiers + keywords
+    debug("SEARCH terms: identifiers=\(identifiers) keywords=\(keywords)")
 
-    // 2a: Counting queries — answer deterministically via shell
-    if queryType == "count" {
-      let countResult = await executeCountQuery(query: query, terms: searchQueries.queries)
+    // Step 1a: Handle counting queries deterministically
+    if Self.isCountQuery(query) {
+      let countResult = await executeCountQuery(query: query, terms: allTerms)
       if !countResult.isEmpty {
         let reflection = AgentReflection(
           taskSummary: "Search: \(query)",
@@ -575,162 +616,158 @@ public actor Orchestrator {
       }
     }
 
-    // 2b: LSP workspace/symbol search (highest precision for definition queries)
-    if queryType == "definition" && lspStarted {
-      for term in searchQueries.queries.prefix(3) {
-        let symbols = await lspClient.workspaceSymbol(query: term)
-        for sym in symbols {
+    // Step 2: Multi-signal search (deterministic, 0 LLM calls)
+    var hits: [SearchHit] = []
+
+    // 2a: Symbol index — exact name matches (highest precision)
+    for entry in projectIndex where !entry.filePath.hasPrefix("Sources/JuncoEval") {
+      for term in identifiers {
+        if entry.symbolName.caseInsensitiveCompare(term) == .orderedSame {
+          // Exact symbol name match
+          let declBoost: Double = entry.kind == .type || entry.kind == .function ? 3.0 : 0
           hits.append(SearchHit(
-            file: sym.file, line: sym.line,
-            snippet: "\(sym.kind) \(sym.name)",
-            source: "lsp", score: 5.0  // LSP results are highest quality
+            file: entry.filePath, line: entry.lineNumber,
+            snippet: entry.snippet, source: "index", score: 10.0 + declBoost
+          ))
+        } else if entry.symbolName.lowercased().contains(term.lowercased()) {
+          hits.append(SearchHit(
+            file: entry.filePath, line: entry.lineNumber,
+            snippet: entry.snippet, source: "index", score: 5.0
           ))
         }
       }
     }
 
-    // 2c: grep/rg — LLM terms PLUS identifiers extracted from the query.
-    // Extract CamelCase identifiers and @-prefixed terms (these are almost always
-    // the exact code symbols the user is asking about).
-    let identifiers = query.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: "@")).inverted)
-      .filter { word in
-        // Keep: CamelCase (AgentMode), @-prefixed (@main), 5+ letter words
-        // Skip: common English words and short words that match everywhere
-        let isIdentifier = word.first?.isUppercase == true || word.hasPrefix("@")
-        let isLongEnough = word.count >= 5
-        let isStopWord = ["where", "what", "this", "that", "have", "from", "does", "many", "which"].contains(word.lowercased())
-        return (isIdentifier || isLongEnough) && !isStopWord
-      }
-    let allGrepTerms = Set(searchQueries.queries + identifiers)
-    let isDefinition = queryType == "definition"
-
-    for term in allGrepTerms.prefix(8) {
+    // 2b: grep/rg — search for identifiers and significant keywords
+    // Identifiers get searched individually (precise).
+    // Keywords get searched only if they're 5+ chars (avoid noise from "test", "run", "main").
+    let grepTerms = identifiers + keywords.filter { $0.count >= 5 }
+    for term in Set(grepTerms).prefix(6) {
       let escaped = shellEscape(term)
       let cmd: String
       if Self.hasRg() {
-        // Exclude JuncoEval (contains test queries as string literals)
         cmd = "rg --type swift -n --glob '!Sources/JuncoEval/**' \(escaped) Sources/ Tests/ Package.swift 2>/dev/null | head -10"
       } else {
         cmd = "grep -rn \(escaped) Sources/JuncoKit/ Tests/ Package.swift --include='*.swift' 2>/dev/null | head -10"
       }
       if let result = try? await shell.execute(cmd), result.exitCode == 0 {
         for line in result.stdout.components(separatedBy: "\n") where !line.isEmpty {
-          if var hit = parseGrepLine(line, term: term) {
-            // Boost definition sites: lines with declaration keywords score higher
-            if isDefinition {
-              let snippet = hit.snippet.trimmingCharacters(in: .whitespaces)
-              let declKeywords = ["enum ", "struct ", "class ", "func ", "protocol ", "actor ", "typealias ", "let ", "var "]
-              if declKeywords.contains(where: { snippet.contains($0) }) {
-                hit = SearchHit(file: hit.file, line: hit.line, snippet: hit.snippet, source: hit.source, score: hit.score + 2.0)
-              }
-            }
+          if let hit = parseGrepLine(line, term: term) {
             hits.append(hit)
           }
         }
       }
     }
 
-    // 2d: Read LLM-suggested file hints (high score — these are targeted)
-    let llmFileHints = Set(searchQueries.fileHints)
-    for fileHint in llmFileHints.prefix(3) {
-      let matched = files.listFiles().filter {
-        !$0.hasPrefix("Sources/JuncoEval") &&
-        ($0.lowercased().contains(fileHint.lowercased()) ||
-         ($0 as NSString).lastPathComponent.lowercased() == fileHint.lowercased())
-      }
-      for file in matched.prefix(2) {
-        if let content = try? files.read(path: file, maxTokens: 2000) {
+    // 2c: LSP workspace/symbol (if available, for identifiers only)
+    if lspStarted {
+      for term in identifiers.prefix(3) {
+        let symbols = await lspClient.workspaceSymbol(query: term)
+        for sym in symbols {
           hits.append(SearchHit(
-            file: file, line: 1,
-            snippet: content,
-            source: "file", score: 4.0  // LLM-targeted file reads score highest
+            file: sym.file, line: sym.line,
+            snippet: "\(sym.kind) \(sym.name)",
+            source: "lsp", score: 8.0
           ))
         }
       }
     }
 
-    // 2e: Well-known project files as fallback (low score — safety net only)
-    if hits.isEmpty {
-      for file in Self.wellKnownFiles(for: domain) {
-        if files.exists(file), let content = try? files.read(path: file, maxTokens: 2000) {
-          hits.append(SearchHit(
-            file: file, line: 1,
-            snippet: content,
-            source: "file", score: 0.5  // Low score — only used if nothing else found
-          ))
+    // 2d: LLM term expansion fallback — only when deterministic search found nothing good.
+    // Most queries with identifiers are handled above. Concept queries ("entry point",
+    // "build target") need the LLM to suggest code-level terms.
+    let hasGoodHits = hits.contains { $0.score >= 5.0 }
+    if !hasGoodHits && !allTerms.isEmpty {
+      debug("SEARCH fallback: no high-quality hits, trying LLM term expansion")
+      let fileList = files.listFiles().prefix(20).joined(separator: "\n")
+      memory.trackCall(estimatedTokens: 600)
+      if let expanded = try? await adapter.generateStructured(
+        prompt: Prompts.searchQueryPrompt(query: query, fileHints: fileList),
+        system: Prompts.searchQuerySystem,
+        as: SearchQueries.self
+      ) {
+        debug("SEARCH LLM terms: \(expanded.queries)")
+        for term in expanded.queries.prefix(5) {
+          let escaped = shellEscape(term)
+          let cmd = Self.hasRg()
+            ? "rg --type swift -n --glob '!Sources/JuncoEval/**' \(escaped) Sources/ Tests/ Package.swift 2>/dev/null | head -8"
+            : "grep -rn \(escaped) Sources/JuncoKit/ Tests/ Package.swift --include='*.swift' 2>/dev/null | head -8"
+          if let result = try? await shell.execute(cmd), result.exitCode == 0 {
+            for line in result.stdout.components(separatedBy: "\n") where !line.isEmpty {
+              if let hit = parseGrepLine(line, term: term) {
+                hits.append(hit)
+              }
+            }
+          }
         }
       }
     }
 
-    // 2f: RAG index search — symbol name matches score higher than snippet matches
-    let ragQueries = Set(searchQueries.queries + identifiers)
-    var seenRAGKeys: Set<String> = []
-    for term in ragQueries.prefix(5) {
-      let termLower = term.lowercased()
-      for entry in projectIndex {
-        // Skip eval harness (contains test query strings)
-        guard !entry.filePath.hasPrefix("Sources/JuncoEval") else { continue }
-        let key = "\(entry.filePath):\(entry.lineNumber)"
-        guard !seenRAGKeys.contains(key) else { continue }
+    // Step 3: Score boosting (deterministic)
 
-        let nameMatch = entry.symbolName.lowercased().contains(termLower)
-        let snippetMatch = !nameMatch && entry.snippet.lowercased().contains(termLower)
-
-        // Skip file-level entries for snippet-only matches — too noisy.
-        if snippetMatch && entry.kind == .file { continue }
-
-        if nameMatch || snippetMatch {
-          seenRAGKeys.insert(key)
-          let score: Double = nameMatch ? 2.5 : 1.0  // Symbol name match >> snippet match
-          hits.append(SearchHit(
-            file: entry.filePath, line: entry.lineNumber,
-            snippet: entry.snippet,
-            source: "rag", score: score
-          ))
-        }
+    // 3a: Declaration boost — lines containing declaration keywords score higher
+    hits = hits.map { hit in
+      let trimmed = hit.snippet.trimmingCharacters(in: .whitespaces)
+      let declPatterns = ["enum ", "struct ", "class ", "func ", "protocol ", "actor "]
+      if declPatterns.contains(where: { trimmed.hasPrefix($0) || trimmed.contains("public \($0)") || trimmed.contains("private \($0)") }) {
+        return SearchHit(file: hit.file, line: hit.line, snippet: hit.snippet, source: hit.source, score: hit.score + 3.0)
       }
+      return hit
     }
 
-    // Step 3: Rank, deduplicate, and format deterministically (0 LLM calls)
+    // 3b: Multi-term intersection boost — hits in files that match multiple query terms
+    let fileTermCounts = Dictionary(grouping: hits, by: \.file)
+      .mapValues { fileHits in Set(fileHits.map { $0.snippet.lowercased() }).count }
+    hits = hits.map { hit in
+      let extraTerms = fileTermCounts[hit.file, default: 1] - 1
+      if extraTerms > 0 {
+        return SearchHit(file: hit.file, line: hit.line, snippet: hit.snippet, source: hit.source, score: hit.score + Double(extraTerms) * 2.0)
+      }
+      return hit
+    }
+
+    // Step 4: Rank, deduplicate, format
     let ranked = rankAndDeduplicate(hits)
     debug("SEARCH → \(ranked.count) hits from \(Set(hits.map(\.source)).sorted())")
 
     if ranked.isEmpty {
+      // Fallback: read well-known files
+      var fallback = "No code matches found. Project files:\n"
+      for file in Self.wellKnownFiles(for: domain) {
+        if files.exists(file) { fallback += "  \(file)\n" }
+      }
       let reflection = AgentReflection(
         taskSummary: "Search: \(query)",
-        insight: "No results found. Try rephrasing or being more specific.",
+        insight: fallback,
         improvement: "", succeeded: false
       )
       metrics.tasksCompleted += 1
       return RunResult(memory: memory, reflection: reflection)
     }
 
-    // Format results deterministically — the answer IS the search results
-    let formattedResults = formatSearchResults(ranked.prefix(8), query: query)
+    // Step 5: Format answer deterministically — results ARE the answer
+    var insight = formatSearchResults(ranked.prefix(8), query: query)
 
-    // Step 4: Optional one-sentence LLM summary (only for interpretive queries)
-    // Definition/reference queries don't need interpretation — results speak for themselves.
-    let needsSummary = ["text", "structural", "reference"].contains(queryType)
-    var insight = ""
-
-    if needsSummary && ranked.count > 1 {
-      let summaryHits = ranked.prefix(3).map { "\($0.file):\($0.line) \($0.snippet.prefix(60))" }.joined(separator: "\n")
+    // Step 6: Optional one-sentence LLM summary for interpretive queries only
+    // "Where is X?" → no summary needed (results are self-explanatory)
+    // "How do tests run?" → brief summary helps connect the dots
+    if Self.isInterpretiveQuery(query) && ranked.count > 1 {
+      let summaryHits = ranked.prefix(3).map {
+        "\($0.file):\($0.line) \($0.snippet.prefix(60))"
+      }.joined(separator: "\n")
       memory.trackCall(estimatedTokens: 300)
       let summary = try await adapter.generate(
-        prompt: "Question: \(query)\nTop results:\n\(summaryHits)\nAnswer in one sentence.",
-        system: "Summarize these search results in one sentence. Be specific — name files and line numbers."
+        prompt: "Q: \(query)\nResults:\n\(summaryHits)\nAnswer in one sentence.",
+        system: Prompts.searchSynthesizeSystem
       )
-      insight = summary + "\n\n"
+      insight = summary + "\n\n" + insight
     }
-
-    insight += formattedResults
 
     let reflection = AgentReflection(
       taskSummary: "Search: \(query)",
       insight: insight,
       improvement: "", succeeded: true
     )
-
     metrics.tasksCompleted += 1
     metrics.totalTokensUsed += memory.totalTokensUsed
     metrics.totalLLMCalls += memory.llmCalls

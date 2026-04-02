@@ -83,15 +83,11 @@ public enum Prompts {
   // MARK: - Search Mode
 
   public static let searchQuerySystem = """
-    You generate search terms for finding code in a Swift/Apple project. \
-    Translate concepts to actual Swift identifiers and filenames: \
-    "build target" → targets, .target(, executableTarget, Package.swift; \
-    "authentication" → Auth, login, credential, Keychain; \
-    "entry point" → @main, App.swift, main.swift. \
-    Generate 3-5 precise code-level terms, not the user's words. \
-    Always include at least one likely filename in fileHints. \
-    queryType: definition (where is X defined), reference (who uses X), \
-    count (how many X), structural (find all X of type Y), text (general search).
+    Generate grep terms for a Swift project. Output code identifiers, not English. \
+    Map concepts: "build target" → .target(, executableTarget; \
+    "entry point" → @main, AsyncParsableCommand; "tests" → @Test, testTarget. \
+    If the user names a specific symbol, include it exactly. \
+    queryType: definition/reference/count/structural/text.
     """
 
   public static func searchQueryPrompt(query: String, fileHints: String) -> String {
@@ -99,21 +95,12 @@ public enum Prompts {
   }
 
   public static let searchSynthesizeSystem = """
-    Answer the user's question using ONLY the search results below. \
-    Start with the file path and line number of the most relevant result. \
-    Then quote the relevant code snippet. \
-    Then briefly explain what it shows. \
-    Do NOT invent information not in the results. \
-    Do NOT add code that isn't shown in the results.
+    Write ONE sentence answering the question. Cite file:line from the results. \
+    Do not invent information.
     """
 
-  public static func searchSynthesizePrompt(query: String, hits: String, projectContext: String = "") -> String {
-    var prompt = "Question: \(query)\n"
-    if !projectContext.isEmpty {
-      prompt += "Project: \(projectContext)\n"
-    }
-    prompt += "\nSearch results:\n\(hits)"
-    return prompt
+  public static func searchSynthesizePrompt(query: String, hits: String) -> String {
+    "Q: \(query)\nResults:\n\(hits)"
   }
 
   // MARK: - Plan Mode

@@ -589,18 +589,41 @@ public actor Orchestrator {
       }
     }
 
-    // 2c: grep/rg for each LLM-generated term
-    for term in searchQueries.queries.prefix(5) {
+    // 2c: grep/rg — LLM terms PLUS identifiers extracted from the query.
+    // Extract CamelCase identifiers and @-prefixed terms (these are almost always
+    // the exact code symbols the user is asking about).
+    let identifiers = query.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: "@")).inverted)
+      .filter { word in
+        // Keep: CamelCase (AgentMode), @-prefixed (@main), 5+ letter words
+        // Skip: common English words and short words that match everywhere
+        let isIdentifier = word.first?.isUppercase == true || word.hasPrefix("@")
+        let isLongEnough = word.count >= 5
+        let isStopWord = ["where", "what", "this", "that", "have", "from", "does", "many", "which"].contains(word.lowercased())
+        return (isIdentifier || isLongEnough) && !isStopWord
+      }
+    let allGrepTerms = Set(searchQueries.queries + identifiers)
+    let isDefinition = queryType == "definition"
+
+    for term in allGrepTerms.prefix(8) {
       let escaped = shellEscape(term)
       let cmd: String
       if Self.hasRg() {
-        cmd = "rg --type swift -n \(escaped) Sources/ Tests/ Package.swift 2>/dev/null | head -8"
+        // Exclude JuncoEval (contains test queries as string literals)
+        cmd = "rg --type swift -n --glob '!Sources/JuncoEval/**' \(escaped) Sources/ Tests/ Package.swift 2>/dev/null | head -10"
       } else {
-        cmd = "grep -rn \(escaped) Sources/ Tests/ Package.swift --include='*.swift' 2>/dev/null | head -8"
+        cmd = "grep -rn \(escaped) Sources/JuncoKit/ Tests/ Package.swift --include='*.swift' 2>/dev/null | head -10"
       }
       if let result = try? await shell.execute(cmd), result.exitCode == 0 {
         for line in result.stdout.components(separatedBy: "\n") where !line.isEmpty {
-          if let hit = parseGrepLine(line, term: term) {
+          if var hit = parseGrepLine(line, term: term) {
+            // Boost definition sites: lines with declaration keywords score higher
+            if isDefinition {
+              let snippet = hit.snippet.trimmingCharacters(in: .whitespaces)
+              let declKeywords = ["enum ", "struct ", "class ", "func ", "protocol ", "actor ", "typealias ", "let ", "var "]
+              if declKeywords.contains(where: { snippet.contains($0) }) {
+                hit = SearchHit(file: hit.file, line: hit.line, snippet: hit.snippet, source: hit.source, score: hit.score + 2.0)
+              }
+            }
             hits.append(hit)
           }
         }
@@ -611,8 +634,9 @@ public actor Orchestrator {
     let llmFileHints = Set(searchQueries.fileHints)
     for fileHint in llmFileHints.prefix(3) {
       let matched = files.listFiles().filter {
-        $0.lowercased().contains(fileHint.lowercased()) ||
-        ($0 as NSString).lastPathComponent.lowercased() == fileHint.lowercased()
+        !$0.hasPrefix("Sources/JuncoEval") &&
+        ($0.lowercased().contains(fileHint.lowercased()) ||
+         ($0 as NSString).lastPathComponent.lowercased() == fileHint.lowercased())
       }
       for file in matched.prefix(2) {
         if let content = try? files.read(path: file, maxTokens: 2000) {
@@ -639,19 +663,20 @@ public actor Orchestrator {
     }
 
     // 2f: RAG index search — symbol name matches score higher than snippet matches
-    let ragQueries = Set(searchQueries.queries + [query])
+    let ragQueries = Set(searchQueries.queries + identifiers)
     var seenRAGKeys: Set<String> = []
     for term in ragQueries.prefix(5) {
       let termLower = term.lowercased()
       for entry in projectIndex {
+        // Skip eval harness (contains test query strings)
+        guard !entry.filePath.hasPrefix("Sources/JuncoEval") else { continue }
         let key = "\(entry.filePath):\(entry.lineNumber)"
         guard !seenRAGKeys.contains(key) else { continue }
 
         let nameMatch = entry.symbolName.lowercased().contains(termLower)
         let snippetMatch = !nameMatch && entry.snippet.lowercased().contains(termLower)
 
-        // Skip file-level entries (line 1, kind .file) for snippet-only matches —
-        // they match too broadly and add noise.
+        // Skip file-level entries for snippet-only matches — too noisy.
         if snippetMatch && entry.kind == .file { continue }
 
         if nameMatch || snippetMatch {

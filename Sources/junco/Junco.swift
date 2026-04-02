@@ -168,17 +168,12 @@ struct Junco: AsyncParsableCommand {
 
     if pipe {
       guard let raw = readLine(), !raw.isEmpty else { return }
-      let parser = InputParser(workingDirectory: cwd)
-      let parsed = parser.parse(raw)
-      let urlCtx: String? = nil
-      let processed = await session.processInput(parsed.query)
       var pipeSession = PersistedSession(workingDirectory: cwd, domain: "general")
       try await runQuery(
-        processed, orchestrator: orchestrator, session: session,
+        raw, orchestrator: orchestrator, session: session,
         persistence: persistence, notifications: notifications,
         markdown: markdown, diffRenderer: diffRenderer,
         sessionStart: sessionStart, history: history,
-        referencedFiles: parsed.referencedFiles, urlContext: urlCtx,
         persistedSession: &pipeSession
       )
       return
@@ -280,59 +275,14 @@ struct Junco: AsyncParsableCommand {
         continue
       }
 
-      // Parse input
-      let parser = InputParser(workingDirectory: cwd)
-      let parsed = parser.parse(trimmed)
-      let urlContext: String? = nil
-
-      // Translation: detect language, translate to English if needed
-      let (translatedQuery, inputLang, translationMsg) = await translator.processInput(parsed.query)
-      if let lang = inputLang {
-        let langName = Locale.current.localizedString(forLanguageCode: lang) ?? lang
-        Toast.show("Detected \(langName) — translating to English for processing", level: .info)
-      }
-      if let msg = translationMsg {
-        let parts = msg.split(separator: ":", maxSplits: 1)
-        let kind = String(parts.first ?? "")
-        let langName = parts.count > 1 ? String(parts[1]) : "this language"
-
-        Terminal.line("")
-        if kind == "afm-fallback" {
-          Terminal.line(Style.yellow("  Using on-device AI for translation (good, not perfect)."))
-          Terminal.line(Style.dim("  For higher quality, download \(langName) translation models."))
-        } else {
-          Terminal.line(Style.yellow("  \(langName) translation models are not installed."))
-          Terminal.line(Style.dim("  junco will try its best, but dedicated models produce better results."))
-        }
-
-        if Terminal.isInteractive {
-          Terminal.line("")
-          print("  Open Language & Region settings to download? [\(Style.cyan("y"))/\(Style.cyan("n"))]: ", terminator: "")
-          fflush(stdout)
-          if let choice = Swift.readLine()?.lowercased().first, choice == "y" {
-            let p = Process()
-            p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-            p.arguments = [TranslationService.settingsURL]
-            try? p.run(); p.waitUntilExit()
-            Terminal.line(Style.dim("  Settings opened. Select your language, enable 'On Device', then try again."))
-            Terminal.line("")
-            continue
-          }
-        }
-        Terminal.line("")
-      }
-
-      let query = await session.processInput(translatedQuery)
-
       await session.saveCheckpoint()
       await bgRunner.markActive()
 
       try await runQuery(
-        query, orchestrator: orchestrator, session: session,
+        trimmed, orchestrator: orchestrator, session: session,
         persistence: persistence, notifications: notifications,
         markdown: markdown, diffRenderer: diffRenderer,
         sessionStart: sessionStart, history: history,
-        referencedFiles: parsed.referencedFiles, urlContext: urlContext,
         persistedSession: &persistedSession, phrases: phrases,
         translator: translator
       )
@@ -345,7 +295,7 @@ struct Junco: AsyncParsableCommand {
   // MARK: - Query Execution
 
   private func runQuery(
-    _ query: String,
+    _ rawInput: String,
     orchestrator: Orchestrator,
     session: SessionManager,
     persistence: SessionPersistence,
@@ -354,15 +304,63 @@ struct Junco: AsyncParsableCommand {
     diffRenderer: DiffRenderer,
     sessionStart: Date,
     history: CommandHistory,
-    referencedFiles: [String] = [],
-    urlContext: String? = nil,
     persistedSession: inout PersistedSession,
     phrases: ThinkingPhrases = ThinkingPhrases(),
     translator: TranslationService? = nil
   ) async throws {
     let taskStart = Date()
     let wordCounter = WordCounter()
+
+    // Single spinner — starts immediately, lives for the entire query lifecycle
     let spinner = Spinner(phrases: phrases)
+    await spinner.start(stage: "classify")
+
+    // Parse input (fast, synchronous)
+    let parser = InputParser(workingDirectory: cwd)
+    let parsed = parser.parse(rawInput)
+
+    // Translation: detect language, translate to English if needed
+    let (translatedQuery, inputLang, translationMsg) = await translator?.processInput(parsed.query)
+      ?? (parsed.query, nil, nil)
+    if let lang = inputLang {
+      await spinner.stop()
+      let langName = Locale.current.localizedString(forLanguageCode: lang) ?? lang
+      Toast.show("Detected \(langName) — translating to English for processing", level: .info)
+    }
+    if let msg = translationMsg {
+      await spinner.stop()
+      let parts = msg.split(separator: ":", maxSplits: 1)
+      let kind = String(parts.first ?? "")
+      let langName = parts.count > 1 ? String(parts[1]) : "this language"
+
+      Terminal.line("")
+      if kind == "afm-fallback" {
+        Terminal.line(Style.yellow("  Using on-device AI for translation (good, not perfect)."))
+        Terminal.line(Style.dim("  For higher quality, download \(langName) translation models."))
+      } else {
+        Terminal.line(Style.yellow("  \(langName) translation models are not installed."))
+        Terminal.line(Style.dim("  junco will try its best, but dedicated models produce better results."))
+      }
+
+      if Terminal.isInteractive {
+        Terminal.line("")
+        print("  Open Language & Region settings to download? [\(Style.cyan("y"))/\(Style.cyan("n"))]: ", terminator: "")
+        fflush(stdout)
+        if let choice = Swift.readLine()?.lowercased().first, choice == "y" {
+          let p = Process()
+          p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+          p.arguments = [TranslationService.settingsURL]
+          try? p.run(); p.waitUntilExit()
+          Terminal.line(Style.dim("  Settings opened. Select your language, enable 'On Device', then try again."))
+          Terminal.line("")
+          return
+        }
+      }
+      Terminal.line("")
+      await spinner.start(stage: "classify")
+    }
+
+    let query = await session.processInput(translatedQuery)
 
     // Build pipeline callbacks — all user I/O happens here in the CLI layer,
     // never inside the orchestrator actor (which would corrupt terminal state).
@@ -424,13 +422,10 @@ struct Junco: AsyncParsableCommand {
       }
     )
 
-    await spinner.start(stage: "classify")
-
     do {
       let result = try await orchestrator.run(
         query: query,
-        referencedFiles: referencedFiles,
-        urlContext: urlContext,
+        referencedFiles: parsed.referencedFiles,
         callbacks: callbacks
       )
       await spinner.stop()

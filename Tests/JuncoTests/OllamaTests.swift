@@ -133,6 +133,53 @@ struct LLMAdapterProtocolTests {
   }
 }
 
+@Suite("Codable JSON Decoding")
+struct CodableDecodingTests {
+
+  @Test("AgentIntent decodes from standard JSON")
+  func decodeAgentIntent() throws {
+    let json = """
+    {"domain":"swift","taskType":"fix","complexity":"simple","mode":"build","targets":["file.swift"]}
+    """
+    let data = json.data(using: .utf8)!
+    let intent = try JSONDecoder().decode(AgentIntent.self, from: data)
+    #expect(intent.domain == "swift")
+    #expect(intent.taskType == "fix")
+  }
+
+  @Test("AgentPlan decodes from standard JSON")
+  func decodeAgentPlan() throws {
+    let json = """
+    {"steps":[{"instruction":"create file","tool":"create","target":"hello.txt"}]}
+    """
+    let data = json.data(using: .utf8)!
+    let plan = try JSONDecoder().decode(AgentPlan.self, from: data)
+    #expect(plan.steps.count == 1)
+    #expect(plan.steps[0].tool == "create")
+  }
+
+  @Test("BashParams decodes from standard JSON")
+  func decodeBashParams() throws {
+    let json = """
+    {"command":"ls -la"}
+    """
+    let data = json.data(using: .utf8)!
+    let params = try JSONDecoder().decode(BashParams.self, from: data)
+    #expect(params.command == "ls -la")
+  }
+
+  @Test("StructuredPlan decodes from standard JSON")
+  func decodeStructuredPlan() throws {
+    let json = """
+    {"summary":"test","sections":[{"heading":"Phase 1","items":["step 1"],"files":["a.swift"]}],"questions":[],"concerns":[]}
+    """
+    let data = json.data(using: .utf8)!
+    let plan = try JSONDecoder().decode(StructuredPlan.self, from: data)
+    #expect(plan.summary == "test")
+    #expect(plan.sections.count == 1)
+  }
+}
+
 @Suite("LLMGenerationOptions")
 struct LLMGenerationOptionsTests {
 

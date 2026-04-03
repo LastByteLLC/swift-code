@@ -180,5 +180,5 @@ extension LLMGenerationOptions {
 // MARK: - Typealias for @Generable conformance requirement
 
 /// Types that can be generated must conform to this.
-/// Uses FoundationModels.Generable since AFM requires it and AnyLanguageModel bridges to it.
-public typealias GenerableContent = FoundationModels.Generable & Sendable
+/// Requires Generable (for AFM structured output), Codable (for Ollama JSON decoding), and Sendable.
+public typealias GenerableContent = FoundationModels.Generable & Codable & Sendable

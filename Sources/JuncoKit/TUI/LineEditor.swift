@@ -66,7 +66,7 @@ public struct CommandCompleter: CompletionProvider {
   public static let allCommands = [
     "/clear", "/context", "/files", "/fork", "/forks",
     "/git", "/help", "/lang", "/metrics", "/model", "/notes", "/paste", "/pastes",
-    "/reflections", "/session", "/speak", "/undo", "/unfork",
+    "/reflections", "/session", "/speak", "/undo", "/unfork", "/usage",
   ]
 
   private let maxResults: Int

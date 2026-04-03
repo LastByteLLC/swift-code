@@ -847,6 +847,17 @@ struct Junco: AsyncParsableCommand {
     case "/model":
       await handleModelSwitch(arg: arg, orchestrator: &orchestrator, cwd: cwd)
 
+    case "/usage":
+      let width = min(Terminal.terminalWidth() - 4, 52)
+      let barWidth = max(width - 4, 20)  // space for brackets + infinity
+      let emptyBar = String(repeating: "\u{2500}", count: barWidth)
+      Terminal.line("")
+      Terminal.line("  \(Style.dim("[\(emptyBar)]")) \u{221E}")
+      Terminal.line("")
+      Terminal.line("  \(Style.dim("No cloud. No subscription. No tokens. No limits."))")
+      Terminal.line("  \(Style.dim("Everything runs on your device."))")
+      Terminal.line("")
+
     default:
       Terminal.line(Style.yellow("Unknown: \(directive)"))
       Terminal.line(Style.dim("Type /help for commands."))
@@ -965,6 +976,7 @@ struct Junco: AsyncParsableCommand {
       ("/context", "Multi-turn context"),
       ("/pastes", "Clipboard paste list"),
       ("/model [backend]", "Show/switch model (afm, ollama)"),
+      ("/usage", "Token usage & limits"),
       ("/help", "This help"),
     ]
     for (cmd, desc) in commands {

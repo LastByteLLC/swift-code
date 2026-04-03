@@ -19,12 +19,12 @@ public actor TranslationService {
   private var userNotified = false
 
   private let systemLanguage: String
-  private let adapter: AFMAdapter?
+  private let adapter: (any LLMAdapter)?
 
   nonisolated(unsafe) private static let availability = LanguageAvailability()
 
   /// Initialize with an optional AFM adapter for LLM-based translation fallback.
-  public init(adapter: AFMAdapter? = nil) {
+  public init(adapter: (any LLMAdapter)? = nil) {
     self.systemLanguage = Locale.current.language.languageCode?.identifier ?? "en"
     self.adapter = adapter
   }

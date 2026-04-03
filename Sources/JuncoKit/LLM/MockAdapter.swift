@@ -1,5 +1,7 @@
 // MockAdapter.swift — Deterministic adapter for testing
 
+import Foundation
+import FoundationModels
 import os
 
 /// A mock LLM adapter that returns preconfigured responses.
@@ -15,6 +17,8 @@ public actor MockAdapter: LLMAdapter {
   }
 
   public var callCount: Int { _history.count }
+
+  public let backendName = "Mock"
 
   public init(responder: @escaping Responder = { _, _ in "mock response" }) {
     self.responder = responder
@@ -41,4 +45,41 @@ public actor MockAdapter: LLMAdapter {
     _history.append((prompt: prompt, system: system))
     return responder(prompt, system)
   }
+
+  public func generateStreaming(
+    prompt: String,
+    system: String?,
+    onChunk: @escaping @Sendable (String) async -> Void
+  ) async throws -> String {
+    let result = try await generate(prompt: prompt, system: system)
+    await onChunk(result)
+    return result
+  }
+
+  public func generateStructured<T: GenerableContent>(
+    prompt: String,
+    system: String?,
+    as type: T.Type,
+    options: LLMGenerationOptions? = nil
+  ) async throws -> T {
+    let text = try await generate(prompt: prompt, system: system)
+    // All @Generable types are also Codable — decode from JSON
+    guard let data = text.data(using: .utf8) else {
+      throw LLMError.generationFailed("Mock: invalid UTF-8 response")
+    }
+    do {
+      // T conforms to Generable & Sendable, and all our @Generable types are Codable.
+      // Use FoundationModels' GeneratedContent to bridge.
+      let content = try FoundationModels.GeneratedContent(json: text)
+      return try T(content)
+    } catch {
+      throw LLMError.generationFailed("Mock: could not decode response as \(T.self): \(error)")
+    }
+  }
+
+  public func countTokens(_ text: String) async -> Int {
+    TokenBudget.estimate(text)
+  }
+
+  public var contextSize: Int { 4096 }
 }

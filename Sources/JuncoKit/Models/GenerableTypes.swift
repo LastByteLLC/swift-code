@@ -63,7 +63,9 @@ public struct AgentIntent: Codable, Sendable {
   public var mode: String
 
   public var targets: [String]
+}
 
+extension AgentIntent {
   /// Typed mode with fallback to .build for unknown values.
   public var agentMode: AgentMode {
     AgentMode(rawValue: mode.lowercased()) ?? .build
@@ -96,7 +98,9 @@ public struct PlanStep: Codable, Sendable {
   public var tool: String
 
   public var target: String
+}
 
+extension PlanStep {
   /// Typed tool name, with fallback to .bash for unknown values.
   public var toolName: ToolName {
     ToolName(rawValue: tool.lowercased()) ?? .bash
@@ -227,7 +231,7 @@ public struct StepCheck: Codable, Sendable {
 public struct CodeSkeleton: Codable, Sendable {
   public var imports: String
   public var typeDeclaration: String
-  public var properties: String
+  public var storedProperties: String
   public var methodSignatures: [String]
 }
 

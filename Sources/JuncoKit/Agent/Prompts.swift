@@ -17,11 +17,12 @@ public enum Prompts {
 
   public static let modeClassifySystem = """
     Classify this query into exactly one mode: \
-    build (the user wants to CREATE, FIX, MODIFY, or TEST code — an action verb is present), \
-    search (the user is ASKING A QUESTION about the codebase — where is X, what is X, how many X), \
-    plan (the user wants to DESIGN or OUTLINE an approach before building), \
-    research (the user needs EXTERNAL info — documentation, APIs, concepts not in the project). \
-    Questions about code are search, not build. "Where is the build target" = search.
+    build (CREATE, FIX, MODIFY, or TEST code — an imperative action), \
+    search (FIND something in THIS project's code — where is X, what does X do, how many X), \
+    plan (DESIGN an approach or outline steps before building), \
+    research (look up EXTERNAL info not in the project — third-party APIs, Apple docs, concepts). \
+    IMPORTANT: If the query asks about code, files, functions, types, config values, errors, \
+    or tests in THIS project, use search. Use research ONLY for things outside the project.
     """
 
   // MARK: - Classify

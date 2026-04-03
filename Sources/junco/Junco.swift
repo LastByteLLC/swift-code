@@ -52,12 +52,15 @@ struct Junco: AsyncParsableCommand {
   @Option(name: .long, help: "Path to a custom .fmadapter package (skips auto-download)")
   var adapter: String?
 
+  @Option(name: .long, help: "Model backend (default: auto). Examples: afm, ollama:qwen2.5-coder")
+  var model: String?
+
   // Shared services (lazy initialized)
   private var cwd: String { directory ?? FileManager.default.currentDirectoryPath }
 
   /// Check that Apple Intelligence is available. Prompts user to enable it if not.
   private func checkAppleIntelligence() -> Bool {
-    let model = SystemLanguageModel.default
+    let model = FoundationModels.SystemLanguageModel.default
     guard model.isAvailable else {
       print("Apple Intelligence is not available on this device.")
       print("")
@@ -77,81 +80,155 @@ struct Junco: AsyncParsableCommand {
     return true
   }
 
-  func run() async throws {
-    // Check Apple Intelligence availability before anything else
-    if !checkAppleIntelligence() { return }
+  /// Load LoRA adapter for AFM backend (extracted from old startup flow).
+  private func loadLoRAIfNeeded(afm: AFMAdapter, cwd: String) async {
+    guard !noAdapter else { return }
 
-    let cwd = self.cwd
-    let afm = AFMAdapter()
+    if let path = adapter {
+      // User-provided adapter — load directly, no auto-download
+      let url = URL(fileURLWithPath: path)
+      guard FileManager.default.fileExists(atPath: url.appendingPathComponent("adapter_weights.bin").path) else {
+        FileHandle.standardError.write(Data("Error: No valid .fmadapter found at \(path)\n".utf8))
+        return
+      }
+      await afm.loadAdapter(from: url)
+      if verbose {
+        FileHandle.standardError.write(Data("[junco] Custom adapter loaded from \(path)\n".utf8))
+      }
+    } else {
+      // Auto-download from manifest
+      let downloader = AdapterDownloader()
+      let result = await downloader.resolve(
+        offline: offline,
+        askPermission: pipe ? nil : {
+          print("A LoRA adapter is available to improve code generation quality.")
+          print("Download it now? (~127 MB, cached for future use) [y/N] ", terminator: "")
+          return readLine()?.lowercased().hasPrefix("y") ?? false
+        },
+        isPipe: pipe
+      )
 
-    if !noAdapter {
-      if let path = adapter {
-        // User-provided adapter — load directly, no auto-download
-        let url = URL(fileURLWithPath: path)
-        guard FileManager.default.fileExists(atPath: url.appendingPathComponent("adapter_weights.bin").path) else {
-          FileHandle.standardError.write(Data("Error: No valid .fmadapter found at \(path)\n".utf8))
-          FileHandle.standardError.write(Data("Expected adapter_weights.bin and metadata.json inside the package.\n".utf8))
-          return
-        }
+      switch result {
+      case .cached(let url):
         await afm.loadAdapter(from: url)
-        if await !afm.hasAdapter {
-          FileHandle.standardError.write(Data("Error: Failed to load adapter from \(path)\n".utf8))
-          return
-        }
         if verbose {
-          FileHandle.standardError.write(Data("[junco] Custom adapter loaded from \(path)\n".utf8))
+          FileHandle.standardError.write(Data("[junco] LoRA adapter loaded (cached)\n".utf8))
         }
-      } else {
-        // Auto-download from manifest
-        let downloader = AdapterDownloader()
-        let result = await downloader.resolve(
-          offline: offline,
-          askPermission: pipe ? nil : {
-            print("A LoRA adapter is available to improve code generation quality.")
-            print("Download it now? (~127 MB, cached for future use) [y/N] ", terminator: "")
-            return readLine()?.lowercased().hasPrefix("y") ?? false
-          },
-          isPipe: pipe
-        )
-
-        switch result {
-        case .cached(let url):
-          await afm.loadAdapter(from: url)
-          if verbose {
-            FileHandle.standardError.write(Data("[junco] LoRA adapter loaded (cached)\n".utf8))
-          }
-        case .downloaded(let url):
-          print("Adapter downloaded successfully.")
-          await afm.loadAdapter(from: url)
-          if verbose {
-            FileHandle.standardError.write(Data("[junco] LoRA adapter loaded (downloaded)\n".utf8))
-          }
-        case .noRelease:
-          if verbose {
-            FileHandle.standardError.write(Data("[junco] No adapter available for this OS version\n".utf8))
-          }
-        case .declined:
-          break  // Continue without adapter
-        case .failed(let error):
-          FileHandle.standardError.write(Data("[junco] Adapter download failed: \(error)\n".utf8))
-        case .offline:
-          if verbose {
-            FileHandle.standardError.write(Data("[junco] Offline mode — skipping adapter download\n".utf8))
-          }
+      case .downloaded(let url):
+        print("Adapter downloaded successfully.")
+        await afm.loadAdapter(from: url)
+        if verbose {
+          FileHandle.standardError.write(Data("[junco] LoRA adapter loaded (downloaded)\n".utf8))
         }
-
-        // Fall back to registered adapter name if download didn't work
-        if await !afm.hasAdapter {
-          await afm.loadAdapter()
+      case .noRelease:
+        if verbose {
+          FileHandle.standardError.write(Data("[junco] No adapter available for this OS version\n".utf8))
+        }
+      case .declined:
+        break
+      case .failed(let error):
+        FileHandle.standardError.write(Data("[junco] Adapter download failed: \(error)\n".utf8))
+      case .offline:
+        if verbose {
+          FileHandle.standardError.write(Data("[junco] Offline mode — skipping adapter download\n".utf8))
         }
       }
 
-      if await afm.hasAdapter && verbose {
-        FileHandle.standardError.write(Data("[junco] LoRA adapter active\n".utf8))
+      // Fall back to registered adapter name if download didn't work
+      if await !afm.hasAdapter {
+        await afm.loadAdapter()
       }
     }
 
-    let orchestrator = Orchestrator(adapter: afm, workingDirectory: cwd)
+    if await afm.hasAdapter && verbose {
+      FileHandle.standardError.write(Data("[junco] LoRA adapter active\n".utf8))
+    }
+  }
+
+  func run() async throws {
+    // Resolve project root — walk up from cwd if in a subdirectory
+    let resolution = ProjectResolver.resolve(from: self.cwd)
+    let cwd = resolution.path
+
+    if resolution.wasAutoDetected {
+      FileHandle.standardError.write(Data(
+        "\u{1B}[2mℹ Detected project root: \(cwd)\u{1B}[0m\n".utf8))
+    } else if !resolution.hasProjectMarkers && !pipe {
+      FileHandle.standardError.write(Data(
+        "\u{1B}[33m⚠ No Swift project detected. Create Package.swift or run from a project directory.\u{1B}[0m\n".utf8))
+    }
+
+    // --- Resolve backend ---
+    let resolvedAdapter: any LLMAdapter
+    let isUsingAFM: Bool
+
+    if let modelSpec = model {
+      // Explicit --model flag
+      if modelSpec.lowercased() == "afm" {
+        if !checkAppleIntelligence() { return }
+        let afm = AFMAdapter()
+        await loadLoRAIfNeeded(afm: afm, cwd: cwd)
+        resolvedAdapter = afm
+        isUsingAFM = true
+      } else if modelSpec.lowercased().hasPrefix("ollama") {
+        // Parse "ollama" or "ollama:modelname"
+        let parts = modelSpec.split(separator: ":", maxSplits: 1)
+        if parts.count == 2 {
+          resolvedAdapter = OllamaAdapter(model: String(parts[1]))
+        } else {
+          // No model specified — auto-detect best model
+          if let best = await OllamaDetector.autoDetect() {
+            resolvedAdapter = OllamaAdapter(model: best.name)
+            FileHandle.standardError.write(Data(
+              "\u{1B}[2mℹ Auto-selected Ollama model: \(best.name)\u{1B}[0m\n".utf8))
+          } else {
+            print("Ollama is not running or has no models available.")
+            print("Start Ollama and pull a model: ollama pull qwen2.5-coder")
+            return
+          }
+        }
+        isUsingAFM = false
+      } else {
+        print("Unknown model backend: \(modelSpec)")
+        print("Supported: afm, ollama, ollama:<model-name>")
+        return
+      }
+    } else {
+      // No --model flag: default to AFM, fall back to Ollama if unavailable
+      let afmAvailable = FoundationModels.SystemLanguageModel.default.isAvailable
+      if afmAvailable {
+        let afm = AFMAdapter()
+        await loadLoRAIfNeeded(afm: afm, cwd: cwd)
+        resolvedAdapter = afm
+        isUsingAFM = true
+      } else {
+        // AFM unavailable — try Ollama auto-detection
+        if let best = await OllamaDetector.autoDetect() {
+          FileHandle.standardError.write(Data(
+            "\u{1B}[33m⚠ Apple Intelligence unavailable. Using Ollama (\(best.name)).\u{1B}[0m\n".utf8))
+          resolvedAdapter = OllamaAdapter(model: best.name)
+          isUsingAFM = false
+        } else {
+          // Neither AFM nor Ollama available
+          print("No language model backend available.")
+          print("")
+          print("Options:")
+          print("  1. Enable Apple Intelligence: System Settings > Apple Intelligence & Siri")
+          print("  2. Install Ollama: https://ollama.com, then: ollama pull qwen2.5-coder")
+          print("")
+          if !pipe {
+            print("Open System Settings now? [y/N] ", terminator: "")
+            if let answer = readLine(), answer.lowercased().hasPrefix("y") {
+              let url = URL(string: "x-apple.systempreferences:com.apple.preference.AppleIntelligence")!
+              NSWorkspace.shared.open(url)
+            }
+          }
+          return
+        }
+      }
+    }
+
+    let orchestrator = Orchestrator(adapter: resolvedAdapter, workingDirectory: cwd)
     if verbose { await orchestrator.setVerbose(true) }
 
     let session = SessionManager(workingDirectory: cwd)
@@ -160,7 +237,7 @@ struct Junco: AsyncParsableCommand {
     let fileTree = FileTreeRenderer(workingDirectory: cwd)
     let persistence = SessionPersistence(workingDirectory: cwd)
     let notifications = NotificationService(workingDirectory: cwd)
-    let translator = TranslationService(adapter: afm)
+    let translator = TranslationService(adapter: resolvedAdapter)
     let markdown = MarkdownRenderer()
     let diffRenderer = DiffRenderer()
     let phrases = ThinkingPhrases(projectDirectory: cwd)
@@ -192,14 +269,17 @@ struct Junco: AsyncParsableCommand {
     let welcome = WelcomeMessage(
       domain: domain, gitBranch: gitBranch,
       fileCount: fileCount, reflectionCount: reflectionCount,
-      workingDirectory: cwd, version: "0.4.0"
+      workingDirectory: cwd, version: "0.4.0",
+      modelInfo: resolvedAdapter.backendName
     )
     print(welcome.render(width: Terminal.terminalWidth()))
 
     // Pre-warm the Neural Engine while the user reads the welcome message.
-    // This loads model resources so the first query responds faster.
-    Task.detached(priority: .background) {
-      await afm.prewarm(systemPrompt: Prompts.classifySystem)
+    // Only applicable for AFM backend.
+    if isUsingAFM, let afm = resolvedAdapter as? AFMAdapter {
+      Task.detached(priority: .background) {
+        await afm.prewarm(systemPrompt: Prompts.classifySystem)
+      }
     }
 
     // Resume session prompt
@@ -214,7 +294,7 @@ struct Junco: AsyncParsableCommand {
 
     // Background task runner for idle-time work
     let bgContext = BackgroundContext(
-      workingDirectory: cwd, adapter: afm, domain: domain
+      workingDirectory: cwd, adapter: resolvedAdapter, domain: domain
     )
     let bgRunner = BackgroundTaskRunner(context: bgContext)
 
@@ -472,6 +552,7 @@ struct Junco: AsyncParsableCommand {
       let result = try await orchestrator.run(
         query: query,
         referencedFiles: parsed.referencedFiles,
+        modeOverride: modeOverride != .build ? modeOverride : nil,
         callbacks: callbacks
       )
       await spinner.stop()

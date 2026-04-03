@@ -13,11 +13,13 @@ public struct WelcomeMessage: Sendable {
   public let reflectionCount: Int
   public let workingDirectory: String
   public let version: String
+  public let modelInfo: String
 
   public init(
     domain: DomainConfig, gitBranch: String? = nil,
     fileCount: Int = 0, reflectionCount: Int = 0,
-    workingDirectory: String, version: String = "0.3.0"
+    workingDirectory: String, version: String = "0.3.0",
+    modelInfo: String = "Apple Foundation Models (Neural Engine)"
   ) {
     self.domain = domain
     self.gitBranch = gitBranch
@@ -25,6 +27,7 @@ public struct WelcomeMessage: Sendable {
     self.reflectionCount = reflectionCount
     self.workingDirectory = workingDirectory
     self.version = version
+    self.modelInfo = modelInfo
   }
 
   /// Render the welcome message for the given terminal width.
@@ -47,7 +50,7 @@ public struct WelcomeMessage: Sendable {
       "  Domain: \(Style.cyan(domain.displayName))" + (gitBranch.map { "  \u{2502}  Git: \(Style.green($0))" } ?? ""),
       "  Dir: \(Style.dim(dir))",
       "  Files: \(fileCount)" + (reflectionCount > 0 ? "  \u{2502}  Reflections: \(reflectionCount)" : ""),
-      "  Model: \(Style.dim("Apple Foundation Models (Neural Engine)"))",
+      "  Model: \(Style.dim(modelInfo))",
       "",
       Style.dim("  /help for commands  \u{2502}  @file to target  \u{2502}  exit to quit"),
       Style.dim(bar),

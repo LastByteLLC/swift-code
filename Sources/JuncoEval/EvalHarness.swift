@@ -259,6 +259,176 @@ struct EvalHarness {
         "Should mention @Test or Tests/ directory",
       ]
     ),
+
+    // --- Function signature / parameter queries ---
+
+    EvalCase(
+      name: "search-func-signature",
+      query: "What parameters does the compress function in ProgressiveCompressor take?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find ProgressiveCompressor.swift",
+        "Should show func compress(code: String, target: Int)",
+      ]
+    ),
+
+    // --- Relationship / reference queries ---
+
+    EvalCase(
+      name: "search-imports",
+      query: "What files import FoundationModels?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find AFMAdapter.swift",
+        "Should find TokenBudget.swift",
+        "Should find GenerableTypes.swift",
+      ]
+    ),
+
+    // --- Project structure ---
+
+    EvalCase(
+      name: "search-project-layers",
+      query: "What directories make up the project structure?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should mention Sources/JuncoKit/Agent, Models, LLM, Tools, RAG, TUI",
+        "Should mention Tests/JuncoTests",
+      ]
+    ),
+
+    // --- Protocol / conformance ---
+
+    EvalCase(
+      name: "search-protocol-conformance",
+      query: "What types conform to CompletionProvider?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find FileCompleter",
+        "Should find CommandCompleter",
+      ]
+    ),
+
+    // --- Config value lookup ---
+
+    EvalCase(
+      name: "search-config-value",
+      query: "What is the default bash timeout?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find Config.swift",
+        "Should show bashTimeout = 30",
+      ]
+    ),
+
+    // --- Error handling / concept ---
+
+    EvalCase(
+      name: "search-error-types",
+      query: "What error types does the pipeline use?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should find PipelineError enum",
+        "Should find LLMError enum",
+        "Should list cases like contextOverflow, deserializationFailed",
+      ]
+    ),
+
+    // --- Test suite discovery ---
+
+    EvalCase(
+      name: "search-test-suites",
+      query: "What test suites exist in this project?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should list multiple @Suite names",
+        "Should mention TokenBudget, LineEditor, ProgressiveCompressor etc.",
+      ]
+    ),
+
+    // --- Explain with @-file (build mode with explicit context) ---
+
+    EvalCase(
+      name: "explain-spinner-file",
+      query: "Explain how this spinner works",
+      referencedFiles: ["Sources/JuncoKit/TUI/Spinner.swift"],
+      expectedMode: nil,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should describe the actor-based animation loop",
+        "Should mention phrase rotation and mode icons",
+        "Should reference ThinkingPhrases",
+      ]
+    ),
+
+    // --- Complex plan ---
+
+    EvalCase(
+      name: "plan-new-mode",
+      query: "Plan adding a Debug mode that shows token usage per LLM call in real time",
+      referencedFiles: [],
+      expectedMode: .plan,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should reference AgentMode enum in GenerableTypes.swift",
+        "Should mention Orchestrator.swift for mode dispatch",
+        "Should suggest adding a case to AgentMode",
+        "Should mention Spinner or ActionLog for real-time display",
+      ]
+    ),
+
+    // --- Count variant ---
+
+    EvalCase(
+      name: "search-count-types",
+      query: "How many structs and enums are defined in this project?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should give concrete numbers",
+        "Should distinguish structs from enums",
+      ]
+    ),
+
+    // --- Multi-concept search ---
+
+    EvalCase(
+      name: "search-multi-concept",
+      query: "What connects the Spinner to the Orchestrator?",
+      referencedFiles: [],
+      expectedMode: .search,
+      destructive: false,
+      setup: nil,
+      qualityCriteria: [
+        "Should mention PipelineCallbacks or the onProgress callback",
+        "Should reference Junco.swift where they're wired together",
+      ]
+    ),
   ]
 
   static let destructiveCases: [EvalCase] = [

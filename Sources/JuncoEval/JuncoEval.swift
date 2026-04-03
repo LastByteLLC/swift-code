@@ -17,7 +17,12 @@ struct JuncoEval {
   static func main() async throws {
     let verbose = CommandLine.arguments.contains("--verbose") || CommandLine.arguments.contains("-v")
     let isEval = CommandLine.arguments.contains("--eval")
-    let baseDir = FileManager.default.currentDirectoryPath
+    // Resolve project root — walks up from cwd to find Package.swift
+    let resolution = ProjectResolver.resolve(from: FileManager.default.currentDirectoryPath)
+    let baseDir = resolution.path
+    if resolution.wasAutoDetected {
+      print("ℹ Using project root: \(baseDir)")
+    }
 
     // Self-evaluation mode
     if isEval {

@@ -25,7 +25,7 @@ public struct TokenGuard: Sendable {
   /// Measure exact tokens if available (iOS 26.4+), otherwise estimate.
   public static func measure(
     _ text: String,
-    using adapter: AFMAdapter,
+    using adapter: any LLMAdapter,
     structured: Bool = false
   ) async -> Int {
     let exact = await adapter.countTokens(text)
@@ -48,7 +48,7 @@ public struct TokenGuard: Sendable {
   public static func compact(
     system: String,
     prompt: String,
-    adapter: AFMAdapter,
+    adapter: any LLMAdapter,
     reserveForGeneration: Int = 1500,
     schemaOverhead: Int = 0
   ) async -> (system: String, prompt: String) {

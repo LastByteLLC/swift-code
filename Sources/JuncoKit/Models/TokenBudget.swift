@@ -1,18 +1,15 @@
 // TokenBudget.swift — Token estimation and budget management
 //
 // Per TN3193: "roughly three to four characters in Latin alphabet languages"
-// Context window size derived from SystemLanguageModel.default.contextSize at runtime.
+// Context window size derived from the active LLMAdapter at runtime.
 
-import FoundationModels
+import Foundation
 
 /// Token budget constants for each pipeline stage.
 public enum TokenBudget {
 
-  /// Context window size derived from the model at runtime.
-  /// Falls back to 4096 only if the model is unavailable.
-  public static var contextWindow: Int {
-    SystemLanguageModel.default.contextSize
-  }
+  /// Default context window size for backends that don't report their own.
+  public static let defaultContextWindow = 4096
 
   // MARK: - Per-stage budgets
 

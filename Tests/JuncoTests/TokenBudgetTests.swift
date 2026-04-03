@@ -46,8 +46,8 @@ struct TokenBudgetTests {
     ]
 
     for stage in stages {
-      #expect(stage.total <= TokenBudget.contextWindow,
-        "Stage budget \(stage.total) exceeds context window \(TokenBudget.contextWindow)")
+      #expect(stage.total <= TokenBudget.defaultContextWindow,
+        "Stage budget \(stage.total) exceeds default context window \(TokenBudget.defaultContextWindow)")
     }
   }
 

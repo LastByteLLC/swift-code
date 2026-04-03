@@ -131,28 +131,28 @@ public struct TemplateRenderer: Sendable {
   public func resolveTemplate(
     filePath: String,
     prompt: String,
-    adapter: AFMAdapter
+    adapter: any LLMAdapter
   ) async throws -> String? {
     let name = (filePath as NSString).lastPathComponent.lowercased()
     guard let system = templateSystemPrompt(for: filePath) else { return nil }
 
     if name.hasSuffix(".entitlements") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: EntitlementsIntent.self)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: EntitlementsIntent.self, options: nil)
       return renderEntitlements(intent)
     } else if name.hasSuffix("package.swift") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: PackageIntent.self)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: PackageIntent.self, options: nil)
       return renderPackage(intent)
     } else if name == "info.plist" || name.hasSuffix(".plist") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: PlistIntent.self)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: PlistIntent.self, options: nil)
       return renderPlist(intent)
     } else if name.hasSuffix(".xcprivacy") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: PrivacyManifestIntent.self)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: PrivacyManifestIntent.self, options: nil)
       return renderPrivacyManifest(intent)
     } else if name == ".gitignore" {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: GitignoreIntent.self)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: GitignoreIntent.self, options: nil)
       return renderGitignore(intent)
     } else if name.hasSuffix(".xcconfig") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: XcconfigIntent.self)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: XcconfigIntent.self, options: nil)
       return renderXcconfig(intent)
     }
     return nil

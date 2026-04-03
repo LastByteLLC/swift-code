@@ -9,7 +9,7 @@ import FoundationModels
 
 public actor Orchestrator {
 
-  private let adapter: AFMAdapter
+  private let adapter: any LLMAdapter
   private let shell: SafeShell
   private let files: FileTools
   private let swiftValidator: SwiftValidator
@@ -45,7 +45,7 @@ public actor Orchestrator {
   public private(set) var lastDiffs: [String] = []
   public private(set) var lastBuildResult: String?
 
-  public init(adapter: AFMAdapter, workingDirectory: String) {
+  public init(adapter: any LLMAdapter, workingDirectory: String) {
     self.adapter = adapter
     self.workingDirectory = workingDirectory
     self.shell = SafeShell(workingDirectory: workingDirectory)
@@ -101,6 +101,7 @@ public actor Orchestrator {
     query: String,
     referencedFiles: [String] = [],
     urlContext: String? = nil,
+    modeOverride: AgentMode? = nil,
     callbacks: PipelineCallbacks = .none
   ) async throws -> RunResult {
     var memory = WorkingMemory(query: query, workingDirectory: workingDirectory)
@@ -166,7 +167,34 @@ public actor Orchestrator {
     // Classify
     let intent = try await classify(query: query, memory: &memory, explicitTargets: referencedFiles)
     memory.intent = intent
-    memory.mode = intent.agentMode
+
+    // Mode resolution: user override > post-classification check > LLM classification
+    if let override = modeOverride, override != .build {
+      // User explicitly selected a mode via shift+tab — respect it
+      memory.mode = override
+      debug("MODE → \(override.rawValue) (user override)")
+    } else {
+      memory.mode = intent.agentMode
+
+      // Post-classification check: if LLM said research but query contains
+      // identifiers found in the project index, override to search.
+      // This prevents local code questions from hitting web search.
+      if memory.mode == .research {
+        let (identifiers, _) = Self.extractSearchTerms(query)
+        let hasLocalSymbols = identifiers.contains { term in
+          projectIndex.contains { $0.symbolName.caseInsensitiveCompare(term) == .orderedSame }
+        }
+        if hasLocalSymbols {
+          memory.mode = .search
+          debug("MODE → search (override: query contains local symbols)")
+        }
+      }
+
+      // @-files provide context to ANY mode — don't force a mode based on their presence.
+      // Build mode has explain shortcut, search uses them as search context,
+      // plan and research use them as reference material.
+    }
+
     await callbacks.onMode?(memory.mode)
     debug("CLASSIFY → mode:\(memory.mode.rawValue) domain:\(intent.domain) type:\(intent.taskType) complexity:\(intent.complexity) targets:\(intent.targets)")
 
@@ -983,6 +1011,11 @@ public actor Orchestrator {
       researchContext += formatted
     }
 
+    // Truncate research context to fit within context window
+    // Reserve: system prompt (~100) + schema overhead (~150) + generation (~800) + safety (~200)
+    let maxResearchTokens = await adapter.contextSize - 1250
+    researchContext = TokenBudget.truncateSmart(researchContext, toTokens: maxResearchTokens)
+
     // Step 3: Synthesize findings via LLM
     if researchContext.isEmpty {
       let reflection = AgentReflection(
@@ -1135,11 +1168,16 @@ public actor Orchestrator {
     "setsumei": "explain", "naoshite": "fix",
   ]
 
-  /// Classify the agent mode via a small dedicated LLM call.
-  /// Used when the ML classifier handles taskType but doesn't know modes.
-  /// Tiny context (~100 tokens) — uses the model's language understanding
-  /// instead of brittle phrase matching.
+  /// Classify the agent mode. Tries ML classifier first, falls back to LLM.
   private func classifyMode(query: String, memory: inout WorkingMemory) async -> AgentMode {
+    // Try ML mode classifier first (~10ms, no LLM call)
+    if let mlMode = intentClassifier.classifyMode(query),
+       mlMode.confidence > Config.mlClassifierConfidence {
+      debug("ML mode classifier: \(mlMode.mode) (confidence: \(String(format: "%.2f", mlMode.confidence)))")
+      return AgentMode(rawValue: mlMode.mode.lowercased()) ?? .build
+    }
+
+    // Fall back to LLM mode classification
     memory.trackCall(estimatedTokens: 200)
     do {
       let result = try await adapter.generateStructured(
@@ -1334,7 +1372,7 @@ public actor Orchestrator {
             prompt: minimalPrompt,
             system: "Generate the file content only. Be very concise.",
             as: CreateParams.self,
-            options: GenerationOptions(maximumResponseTokens: 2000)
+            options: LLMGenerationOptions(maximumResponseTokens: 2000)
           )
           let retryPath = step.target.isEmpty ? retry.filePath : step.target
           let fallbackAction = ToolAction.create(path: retryPath, content: retry.content)
@@ -1437,7 +1475,7 @@ public actor Orchestrator {
       let skillHint = step.target.hasSuffix(".swift")
         ? (skillLoader.skillHints(domain: memory.intent?.domain ?? "swift", taskType: memory.intent?.taskType ?? "fix", budget: 100) ?? "")
         : ""
-      let editBudget = TokenBudget.contextWindow - TokenBudget.estimate(editSystem) - 150 - 400
+      let editBudget = await adapter.contextSize - TokenBudget.estimate(editSystem) - 150 - 400
       let editPrompt = base + "\nRequest: " + TokenBudget.truncate(memory.query, toTokens: 100) + "\n\n"
         + TokenBudget.packSections([
           PromptSection(label: "File", content: codeContext, priority: 90),
@@ -1446,12 +1484,12 @@ public actor Orchestrator {
           PromptSection(label: "Hints", content: skillHint, priority: 20),
         ], budget: editBudget)
       let editInputEst = TokenBudget.estimate(editPrompt) + TokenBudget.estimate(editSystem) + 150
-      let editMaxOutput = max(400, TokenBudget.contextWindow - editInputEst - 100)
+      let editMaxOutput = max(400, await adapter.contextSize - editInputEst - 100)
       let p = try await adapter.generateStructured(
         prompt: editPrompt,
         system: editSystem,
         as: EditParams.self,
-        options: GenerationOptions(maximumResponseTokens: editMaxOutput)
+        options: LLMGenerationOptions(maximumResponseTokens: editMaxOutput)
       )
       let editPath = step.target.isEmpty ? p.filePath : step.target
       return .edit(path: editPath, find: p.find, replace: p.replace)
@@ -1499,13 +1537,13 @@ public actor Orchestrator {
     lines.append(skeleton.imports)
     lines.append("")
     lines.append(skeleton.typeDeclaration)
-    for prop in skeleton.properties.components(separatedBy: "\n") where !prop.isEmpty {
+    for prop in skeleton.storedProperties.components(separatedBy: "\n") where !prop.isEmpty {
       lines.append("    \(prop.trimmingCharacters(in: .whitespaces))")
     }
     lines.append("")
 
     // Phase 2: Fill each method body
-    let propsSummary = TokenBudget.truncate(skeleton.properties, toTokens: 80)
+    let propsSummary = TokenBudget.truncate(skeleton.storedProperties, toTokens: 80)
     for sig in skeleton.methodSignatures where !sig.isEmpty {
       let shortSig = String(sig.prefix(120))
       debug("  two-phase: filling method \(shortSig.prefix(50))")

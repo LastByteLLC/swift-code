@@ -27,10 +27,10 @@ public protocol BackgroundWork: Sendable {
 /// Context passed to background tasks.
 public struct BackgroundContext: Sendable {
   public let workingDirectory: String
-  public let adapter: AFMAdapter
+  public let adapter: any LLMAdapter
   public let domain: DomainConfig
 
-  public init(workingDirectory: String, adapter: AFMAdapter, domain: DomainConfig) {
+  public init(workingDirectory: String, adapter: any LLMAdapter, domain: DomainConfig) {
     self.workingDirectory = workingDirectory
     self.adapter = adapter
     self.domain = domain

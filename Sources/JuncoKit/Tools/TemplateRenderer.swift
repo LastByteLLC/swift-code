@@ -336,43 +336,39 @@ public struct TemplateRenderer: Sendable {
   // MARK: - SwiftUI App Entry Point
 
   public func renderAppEntryPoint(_ intent: AppEntryPointIntent) -> String {
-    var lines = [
-      "import SwiftUI",
-      "",
-      "@main",
-      "struct \(intent.appName): App {",
-    ]
-    for prop in intent.stateProperties where !prop.isEmpty {
-      lines.append("    \(prop)")
-    }
-    if !intent.stateProperties.filter({ !$0.isEmpty }).isEmpty {
-      lines.append("")
-    }
-    lines.append("    var body: some Scene {")
-    lines.append("        WindowGroup {")
-    lines.append("            \(intent.rootView)()")
-    lines.append("        }")
-    lines.append("    }")
-    lines.append("}")
-    return lines.joined(separator: "\n") + "\n"
+    let props = intent.stateProperties.filter { !$0.isEmpty }
+    return SwiftCode {
+      Import("SwiftUI")
+      Blank()
+      Struct(intent.appName, attributes: ["@main"], conformances: ["App"]) {
+        for prop in props {
+          Property(prop)
+        }
+        if !props.isEmpty { Blank() }
+        ComputedVar("body", type: "some Scene") {
+          Line("WindowGroup {")
+          Line("    \(intent.rootView)()")
+          Line("}")
+        }
+      }
+    }.render()
   }
 
   // MARK: - Swift Test File
 
   public func renderSwiftTest(_ intent: SwiftTestIntent) -> String {
-    var lines = [
-      "import Testing",
-      "@testable import \(intent.moduleName)",
-      "",
-    ]
-    for (i, testName) in intent.testNames.enumerated() {
-      let desc = i < intent.testDescriptions.count ? intent.testDescriptions[i] : testName
-      lines.append("@Test func \(testName)() {")
-      lines.append("    // \(desc)")
-      lines.append("}")
-      lines.append("")
-    }
-    return lines.joined(separator: "\n")
+    return SwiftCode {
+      Import("Testing")
+      Line("@testable import \(intent.moduleName)")
+      Blank()
+      for (i, testName) in intent.testNames.enumerated() {
+        let desc = i < intent.testDescriptions.count ? intent.testDescriptions[i] : testName
+        Function("@Test func \(testName)()") {
+          Comment(desc)
+        }
+        Blank()
+      }
+    }.render()
   }
 
   // MARK: - Plist Serialization

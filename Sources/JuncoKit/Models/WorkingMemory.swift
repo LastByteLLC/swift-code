@@ -20,9 +20,6 @@ public struct WorkingMemory: Sendable {
   /// Classified intent (set after classify stage).
   public var intent: AgentIntent?
 
-  /// Selected strategy (set after discover stage).
-  public var strategy: AgentStrategy?
-
   /// Current plan (set after plan stage).
   public var plan: AgentPlan?
 
@@ -74,10 +71,6 @@ public struct WorkingMemory: Sendable {
 
     if let intent {
       parts.append("Mode: \(mode.rawValue) | Domain: \(intent.domain) | Type: \(intent.taskType) | Complexity: \(intent.complexity)")
-    }
-
-    if let strategy {
-      parts.append("Strategy: \(strategy.approach)")
     }
 
     if let plan {

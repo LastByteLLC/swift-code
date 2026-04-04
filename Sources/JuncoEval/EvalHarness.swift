@@ -55,7 +55,7 @@ struct EvalHarness {
       name: "search-build-target",
       query: "Where is the build target defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -68,7 +68,7 @@ struct EvalHarness {
       name: "search-entry-point",
       query: "What is the main entry point of this app?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -80,19 +80,19 @@ struct EvalHarness {
       name: "search-mode-enum",
       query: "Where is AgentMode defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
         "Should find GenerableTypes.swift",
-        "Should list cases: build, search, plan, research",
+        "Should list cases: build, answer",
       ]
     ),
     EvalCase(
       name: "search-how-tests",
       query: "How do tests run in this project?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -105,7 +105,7 @@ struct EvalHarness {
       name: "plan-add-feature",
       query: "Plan how to add a /history command that shows past queries",
       referencedFiles: [],
-      expectedMode: .plan,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -118,7 +118,7 @@ struct EvalHarness {
       name: "plan-refactor",
       query: "Plan a refactor of the Orchestrator to reduce its size",
       referencedFiles: [],
-      expectedMode: .plan,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -144,7 +144,7 @@ struct EvalHarness {
       name: "search-file-count",
       query: "How many Swift source files are in this project?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -159,7 +159,7 @@ struct EvalHarness {
       name: "search-identifier-orchestrator",
       query: "Where is the Orchestrator class defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -171,7 +171,7 @@ struct EvalHarness {
       name: "search-identifier-tokenbudget",
       query: "Where is TokenBudget defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -183,7 +183,7 @@ struct EvalHarness {
       name: "search-identifier-safeshell",
       query: "Find SafeShell",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -197,7 +197,7 @@ struct EvalHarness {
       name: "search-concept-entry-point",
       query: "What is the main entry point of this app?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -209,7 +209,7 @@ struct EvalHarness {
       name: "search-concept-dependencies",
       query: "What external dependencies does this project use?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -224,7 +224,7 @@ struct EvalHarness {
       name: "search-adversarial-build",
       query: "Where is the build verification logic?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -236,7 +236,7 @@ struct EvalHarness {
       name: "search-adversarial-fix",
       query: "Where are validation errors fixed in the pipeline?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -251,7 +251,7 @@ struct EvalHarness {
       name: "search-count-tests",
       query: "How many test cases are there?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -266,7 +266,7 @@ struct EvalHarness {
       name: "search-func-signature",
       query: "What parameters does the compress function in ProgressiveCompressor take?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -281,7 +281,7 @@ struct EvalHarness {
       name: "search-imports",
       query: "What files import FoundationModels?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -297,7 +297,7 @@ struct EvalHarness {
       name: "search-project-layers",
       query: "What directories make up the project structure?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -312,7 +312,7 @@ struct EvalHarness {
       name: "search-protocol-conformance",
       query: "What types conform to CompletionProvider?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -327,7 +327,7 @@ struct EvalHarness {
       name: "search-config-value",
       query: "What is the default bash timeout?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -342,7 +342,7 @@ struct EvalHarness {
       name: "search-error-types",
       query: "What error types does the pipeline use?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -358,7 +358,7 @@ struct EvalHarness {
       name: "search-test-suites",
       query: "What test suites exist in this project?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -389,7 +389,7 @@ struct EvalHarness {
       name: "plan-new-mode",
       query: "Plan adding a Debug mode that shows token usage per LLM call in real time",
       referencedFiles: [],
-      expectedMode: .plan,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -406,7 +406,7 @@ struct EvalHarness {
       name: "search-count-types",
       query: "How many structs and enums are defined in this project?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -421,7 +421,7 @@ struct EvalHarness {
       name: "search-multi-concept",
       query: "What connects the Spinner to the Orchestrator?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -436,7 +436,7 @@ struct EvalHarness {
       name: "search-nested-type",
       query: "Where is SymbolKind defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -448,7 +448,7 @@ struct EvalHarness {
       name: "search-extension-conformance",
       query: "What extensions add Codable conformance?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -460,7 +460,7 @@ struct EvalHarness {
       name: "search-init-declarations",
       query: "Where is the Orchestrator initializer defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -472,7 +472,7 @@ struct EvalHarness {
       name: "search-enum-cases",
       query: "What are the cases of PipelineError?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -484,7 +484,7 @@ struct EvalHarness {
       name: "search-typealias",
       query: "Are there any typealiases in this project?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -499,7 +499,7 @@ struct EvalHarness {
       name: "search-depends-on-config",
       query: "What files use Config?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -512,7 +512,7 @@ struct EvalHarness {
       name: "search-depends-on-safeshell",
       query: "What files depend on SafeShell?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -524,7 +524,7 @@ struct EvalHarness {
       name: "search-cross-file-usage",
       query: "Where is IndexEntry used outside of FileIndexer?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -536,7 +536,7 @@ struct EvalHarness {
       name: "search-symbol-index-users",
       query: "What files use SymbolIndex?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -552,7 +552,7 @@ struct EvalHarness {
       name: "search-afm-adapter-callers",
       query: "What code calls AFMAdapter?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -564,7 +564,7 @@ struct EvalHarness {
       name: "search-pipeline-callbacks",
       query: "Where are PipelineCallbacks created and consumed?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -577,7 +577,7 @@ struct EvalHarness {
       name: "search-tree-sitter-integration",
       query: "How does tree-sitter integrate with the indexing pipeline?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -590,7 +590,7 @@ struct EvalHarness {
       name: "search-reference-graph-build",
       query: "How is the reference graph built?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -606,7 +606,7 @@ struct EvalHarness {
       name: "search-property-lookup",
       query: "Where is bashTimeout defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [
@@ -618,7 +618,7 @@ struct EvalHarness {
       name: "search-static-property",
       query: "Where is the empty reference graph defined?",
       referencedFiles: [],
-      expectedMode: .search,
+      expectedMode: .answer,
       destructive: false,
       setup: nil,
       qualityCriteria: [

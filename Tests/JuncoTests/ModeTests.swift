@@ -33,9 +33,9 @@ struct ModeTests {
   func intentModeParsing() {
     let intent = AgentIntent(
       domain: "swift", taskType: "fix", complexity: "simple",
-      mode: "search", targets: []
+      mode: "answer", targets: []
     )
-    #expect(intent.agentMode == .search)
+    #expect(intent.agentMode == .answer)
   }
 
   @Test("AgentIntent.agentMode defaults to build for unknown")
@@ -47,13 +47,15 @@ struct ModeTests {
     #expect(intent.agentMode == .build)
   }
 
-  @Test("AgentIntent.agentMode is case-insensitive")
-  func intentModeCaseInsensitive() {
-    let intent = AgentIntent(
-      domain: "swift", taskType: "explore", complexity: "simple",
-      mode: "RESEARCH", targets: []
-    )
-    #expect(intent.agentMode == .research)
+  @Test("AgentIntent.agentMode maps legacy modes to answer")
+  func intentModeLegacyMapping() {
+    for legacy in ["search", "plan", "research"] {
+      let intent = AgentIntent(
+        domain: "swift", taskType: "explore", complexity: "simple",
+        mode: legacy, targets: []
+      )
+      #expect(intent.agentMode == .answer, "Legacy mode '\(legacy)' should map to .answer")
+    }
   }
 
   // MARK: - WorkingMemory Mode
@@ -67,9 +69,9 @@ struct ModeTests {
   @Test("compact description includes mode icon")
   func compactIncludesMode() {
     var memory = WorkingMemory(query: "find the auth handler")
-    memory.mode = .search
+    memory.mode = .answer
     let desc = memory.compactDescription()
-    #expect(desc.contains("⌕"), "Compact description missing search mode icon")
+    #expect(desc.contains("⌕"), "Compact description missing answer mode icon")
   }
 
   // MARK: - SearchHit
@@ -147,9 +149,7 @@ struct ModeTests {
   @Test("mode-specific thinking phrases exist")
   func modePhrases() {
     let phrases = ThinkingPhrases()
-    for stage in ["search-mode", "plan-mode", "research-mode"] {
-      let p = phrases.phrase(for: stage)
-      #expect(!p.isEmpty, "No phrase for \(stage)")
-    }
+    let p = phrases.phrase(for: "answer-mode")
+    #expect(!p.isEmpty, "No phrase for answer-mode")
   }
 }

@@ -38,11 +38,9 @@ struct TokenBudgetTests {
   func budgetsFit() {
     let stages: [StageBudget] = [
       TokenBudget.classify,
-      TokenBudget.strategy,
       TokenBudget.plan,
       TokenBudget.execute,
       TokenBudget.observe,
-      TokenBudget.reflect,
     ]
 
     for stage in stages {

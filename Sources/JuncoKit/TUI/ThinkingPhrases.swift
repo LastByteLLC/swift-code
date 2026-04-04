@@ -98,29 +98,15 @@ public struct ThinkingPhrases: Sendable {
       "Interpreting",
       "Documenting",
     ],
-    "search-mode": [
+    "answer-mode": [
       "Searching",
       "Scanning codebase",
       "Finding matches",
       "Locating symbols",
       "Querying index",
       "Analyzing results",
-    ],
-    "plan-mode": [
-      "Planning",
-      "Outlining steps",
-      "Analyzing scope",
-      "Mapping dependencies",
-      "Structuring phases",
-      "Identifying risks",
-    ],
-    "research-mode": [
       "Researching",
-      "Fetching docs",
       "Gathering context",
-      "Reading documentation",
-      "Consulting references",
-      "Compiling findings",
     ],
   ]
 

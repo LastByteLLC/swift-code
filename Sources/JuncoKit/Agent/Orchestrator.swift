@@ -1,6 +1,6 @@
 // Orchestrator.swift — Main agent pipeline
 //
-// classify → strategy → plan → execute (2-phase) → reflect
+// classify → plan → execute (2-phase) → reflect
 // All features wired: permissions, build verification, diff preview,
 // micro-skills, scratchpad, web search, notifications.
 
@@ -34,11 +34,14 @@ public actor Orchestrator {
   private let workingDirectory: String
   public let domain: DomainConfig
   private let intentClassifier: IntentClassifier
+  private let projectAnalyzer: ProjectAnalyzer
+  private let taskResolver: TaskResolver
   private var lspStarted = false
 
   private var projectIndex: [IndexEntry] = []
   private let embeddingIndex = EmbeddingIndex()
   private var referenceGraph: ReferenceGraph = .empty
+  private var projectSnapshot: ProjectSnapshot = .empty
   private var needsReindex = true
   private var activeCallbacks: PipelineCallbacks = .none
 
@@ -70,6 +73,8 @@ public actor Orchestrator {
     self.permissionService = PermissionService(workingDirectory: workingDirectory)
     self.domain = DomainDetector(workingDirectory: workingDirectory).detect()
     self.intentClassifier = IntentClassifier()
+    self.projectAnalyzer = ProjectAnalyzer()
+    self.taskResolver = TaskResolver(workingDirectory: workingDirectory)
     self.fileWatcher = FileWatcher(directory: workingDirectory)
     self.lspClient = LSPClient(workingDirectory: workingDirectory)
     self.linter = PostGenerationLinter()
@@ -177,6 +182,12 @@ public actor Orchestrator {
       )
       debug("Reference graph: \(referenceGraph.edgeCount) edges")
 
+      // Build project snapshot for task resolution
+      projectSnapshot = projectAnalyzer.analyze(
+        index: projectIndex, domain: domain, files: files
+      )
+      debug("Snapshot: \(projectSnapshot.models.count) models, \(projectSnapshot.views.count) views, \(projectSnapshot.services.count) services")
+
       // Build embedding index in background (non-blocking)
       let entries = projectIndex
       Task.detached(priority: .utility) { [embeddingIndex] in
@@ -196,23 +207,7 @@ public actor Orchestrator {
     } else {
       memory.mode = intent.agentMode
 
-      // Post-classification check: if LLM said research but query contains
-      // identifiers found in the project index, override to search.
-      // This prevents local code questions from hitting web search.
-      if memory.mode == .research {
-        let (identifiers, _) = Self.extractSearchTerms(query)
-        let hasLocalSymbols = identifiers.contains { term in
-          projectIndex.contains { $0.symbolName.caseInsensitiveCompare(term) == .orderedSame }
-        }
-        if hasLocalSymbols {
-          memory.mode = .search
-          debug("MODE → search (override: query contains local symbols)")
-        }
-      }
-
       // @-files provide context to ANY mode — don't force a mode based on their presence.
-      // Build mode has explain shortcut, search uses them as search context,
-      // plan and research use them as reference material.
     }
 
     await callbacks.onMode?(memory.mode)
@@ -231,16 +226,12 @@ public actor Orchestrator {
       }
     }
 
-    // Mode dispatch — each mode has its own pipeline variant
+    // Mode dispatch — build modifies files, answer reads + responds
     switch memory.mode {
     case .build:
       return try await runBuild(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
-    case .search:
-      return try await runSearch(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
-    case .plan:
-      return try await runPlan(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
-    case .research:
-      return try await runResearch(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+    case .answer:
+      return try await runAnswer(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
     }
   }
 
@@ -254,139 +245,55 @@ public actor Orchestrator {
     let query = memory.query
     let intent = memory.intent!
 
-    // Explain/explore shortcut with @-files — supports streaming
-    if (intent.taskType == "explain" || intent.taskType == "explore") && !explicitContext.isEmpty {
-      debug("SHORTCUT: explain/explore with @-referenced files, skipping plan")
-      let explainPrompt = "Task: \(query)\n\nContent:\n\(TokenBudget.truncate(explicitContext, toTokens: 2500))"
-      let systemPrompt = "You are a coding assistant. Explain the provided code or documentation clearly and concisely. \(domain.promptHint)"
-      memory.trackCall(estimatedTokens: TokenBudget.execute.total)
-
-      let response: String
-      if let onStream = callbacks.onStream {
-        // Stream output chunk by chunk for real-time display
-        response = try await adapter.generateStreaming(
-          prompt: explainPrompt, system: systemPrompt, onChunk: onStream
-        )
-      } else {
-        response = try await adapter.generate(prompt: explainPrompt, system: systemPrompt)
-      }
-
-      let reflection = AgentReflection(
-        taskSummary: "Explained \(intent.targets.joined(separator: ", "))",
-        insight: response, improvement: "", succeeded: true
-      )
-      debug("EXPLAIN → \(TokenBudget.estimate(response)) tokens")
-      try? reflectionStore.save(query: query, reflection: reflection)
-      metrics.tasksCompleted += 1
-      metrics.totalTokensUsed += memory.totalTokensUsed
-      metrics.totalLLMCalls += memory.llmCalls
-      return RunResult(memory: memory, reflection: reflection, wasStreamed: true)
+    // Task resolution: recipe templates (0 LLM calls) → LLM fallback (1 call)
+    let tasks = try await taskResolver.resolve(
+      query: query, intent: intent, snapshot: projectSnapshot,
+      index: projectIndex, explicitContext: explicitContext, adapter: adapter
+    )
+    debug("TASKS → \(tasks.count) task(s) via \(tasks.isEmpty ? "none" : "resolver"):")
+    for (i, task) in tasks.enumerated() {
+      debug("  [\(i + 1)] \(task.action.rawValue): \(task.target)")
     }
 
-    // Fast path: DISABLED — the LoRA adapter makes the full pipeline reliable,
-    // and the fast path hits context window limits on non-trivial file creation.
-    // The regular pipeline (strategy → plan → execute) gives the model separate
-    // token budgets per stage, avoiding overflow.
-    if false && intent.taskType == "add" && intent.complexity == "simple" {
-      let newTargets = intent.targets.filter { !files.exists($0) }
-      if !newTargets.isEmpty && newTargets.count <= 2 && explicitContext.isEmpty {
-        debug("FAST PATH: simple create for \(newTargets)")
+    // Execute tasks directly (1 LLM call per task)
+    var filesWereModified = false
+    let totalTasks = tasks.count
 
-        let urls = Self.extractURLs(query)
-        let urlHint = urls.isEmpty ? "" : "\nIMPORTANT: Use these exact URLs in the code (do not substitute): \(urls.joined(separator: ", "))"
+    for (index, task) in tasks.enumerated() {
+      memory.currentStepIndex = index
 
-        for target in newTargets {
-          let prompt = """
-            Create the file \(target).
-            User request: \(query)\(urlHint)
-            Project root: \(workingDirectory)
-            """
-          memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+      // Progress callback
+      await callbacks.onProgress?(index + 1, totalTasks, "\(task.action.rawValue) \(task.target)")
 
-          let params = try await adapter.generateStructured(
-            prompt: prompt,
-            system: "Generate the file path and complete content. Follow the user's request precisely. \(domain.promptHint)",
-            as: CreateParams.self
-          )
-          let path = target.isEmpty ? params.filePath : target
-          var content = params.content
+      // Stuck detection
+      if memory.observations.suffix(3).allSatisfy({ $0.outcome == .error }) && memory.observations.count >= 3 {
+        debug("GUARDRAIL: stuck — 3 consecutive errors, aborting")
+        memory.addError("Stuck: 3 consecutive task failures.")
+        break
+      }
 
-          // Validate with retry
-          var retries = 0
-          while retries < Config.maxValidationRetries {
-            let feedback = validatorRegistry.validate(code: content, filePath: path)
-            guard let error = feedback else { break }
-            retries += 1
-            debug("FAST PATH validation retry \(retries): \(error)")
-            memory.trackCall(estimatedTokens: 800)
-            let fixed = try await adapter.generateStructured(
-              prompt: "Fix this code.\nError: \(error)\n\nCode:\n\(content)",
-              system: "Fix the error. Return the complete corrected file.",
-              as: CreateParams.self
-            )
-            content = fixed.content
-          }
+      let observation = await executeConcreteTask(task: task, memory: &memory)
+      memory.addObservation(observation)
+      if task.action == .create || task.action == .edit {
+        filesWereModified = true
+      }
+      debug("TASK[\(index + 1)] → [\(observation.outcome.rawValue)] \(observation.tool): \(observation.keyFact)")
 
-          // Final validation
-          if let finalError = validatorRegistry.validate(code: content, filePath: path) {
-            memory.addObservation(StepObservation(tool: "create", outcome: .error, keyFact: finalError))
-            memory.addError(finalError)
-            continue
-          }
-
-          // Permission + write
-          let decision = await askPermission(tool: "create", target: path, detail: "\(content.count) chars")
-          guard decision != .deny else { continue }
-          memory.touch(path)
-          metrics.filesModified += 1
-          try files.write(path: path, content: content)
-          lastDiffs.append(diffPreview.diffWrite(filePath: path, existingContent: nil, newContent: content))
-          memory.addObservation(StepObservation(tool: "create", outcome: .ok, keyFact: "Created \(path) (\(content.count) chars)"))
-
-          // Post-write verification: check URLs were preserved
-          for url in urls {
-            if !content.contains(url) {
-              memory.addError("URL not found in output: \(url)")
-            }
-          }
-
-          // Post-write verification: check quoted requirements
-          if let missing = Self.verifyContent(content: content, query: query) {
-            debug("Content verification: \(missing)")
-          }
+      // Early termination on simple create success
+      if intent.complexity == "simple" && index == 0 && tasks.count > 1 {
+        if observation.outcome == .ok && task.action == .create {
+          debug("EARLY EXIT: simple create succeeded on task 1")
+          break
         }
-
-        // Build verify
-        if metrics.filesModified > 0 {
-          let buildResult = await buildRunner.verify()
-          if !buildResult.isEmpty {
-            lastBuildResult = buildResult
-            if buildResult.contains("FAIL") {
-              memory.addError("Build failed: \(String(buildResult.prefix(200)))")
-            }
-          }
-        }
-
-        let reflection = AgentReflection(
-          taskSummary: "Created \(newTargets.joined(separator: ", "))",
-          insight: memory.didSucceed ? "Files created successfully." : "Some files could not be created.",
-          improvement: "", succeeded: memory.didSucceed
-        )
-        debug("FAST PATH → succeeded:\(reflection.succeeded)")
-        try? reflectionStore.save(query: query, reflection: reflection)
-        metrics.tasksCompleted += 1
-        metrics.totalTokensUsed += memory.totalTokensUsed
-        metrics.totalLLMCalls += memory.llmCalls
-        return RunResult(memory: memory, reflection: reflection)
       }
     }
 
-    let strategy = try await discoverStrategy(query: query, intent: intent, memory: &memory)
-    memory.strategy = strategy
-    debug("STRATEGY → approach:\(strategy.approach) start:\(strategy.startingPoints) risk:\(strategy.risk)")
-
-    let plan = try await plan(
-      query: query, intent: intent, strategy: strategy,
+    // Also support legacy PlanStep path for LLM-generated plans
+    // (used when TaskResolver falls back to LLM decomposition that produces PlanSteps)
+    if tasks.isEmpty {
+      // Fallback to old plan path
+      let plan = try await plan(
+      query: query, intent: intent,
       memory: &memory, explicitContext: explicitContext
     )
 
@@ -532,6 +439,7 @@ public actor Orchestrator {
         }
       }
     }
+    } // end if tasks.isEmpty (legacy plan fallback)
 
     // Build verification + LSP diagnostics after modifications
     // Only verify if modified files match the project's domain extensions
@@ -575,7 +483,7 @@ public actor Orchestrator {
     // Build-fix reflexion loop: attempt to fix build errors before reflecting
     await buildAndFix(memory: &memory)
 
-    let reflection = try await reflect(memory: &memory)
+    let reflection = reflect(memory: memory)
     debug("REFLECT → succeeded:\(reflection.succeeded) insight:\(reflection.insight)")
 
     try? reflectionStore.save(query: query, reflection: reflection)
@@ -587,7 +495,77 @@ public actor Orchestrator {
     return RunResult(memory: memory, reflection: reflection)
   }
 
-  // MARK: - Search Mode
+  // MARK: - Answer Mode (unified: search, plan, research, explain)
+
+  /// Unified answer pipeline — routes to search, plan, or research sub-paths.
+  /// Replaces the former separate search/plan/research modes.
+  private func runAnswer(
+    memory: inout WorkingMemory,
+    explicitContext: String,
+    callbacks: PipelineCallbacks
+  ) async throws -> RunResult {
+    let query = memory.query
+    let intent = memory.intent
+
+    // Sub-type dispatch based on intent + query analysis
+
+    // 1. Explain/explore shortcut with @-files (streaming)
+    if let intent, (intent.taskType == "explain" || intent.taskType == "explore") && !explicitContext.isEmpty {
+      debug("ANSWER: explain/explore with @-referenced files")
+      let explainPrompt = "Task: \(query)\n\nContent:\n\(TokenBudget.truncate(explicitContext, toTokens: 2500))"
+      let systemPrompt = "You are a coding assistant. Explain the provided code or documentation clearly and concisely. \(domain.promptHint)"
+      memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+
+      let response: String
+      if let onStream = callbacks.onStream {
+        response = try await adapter.generateStreaming(
+          prompt: explainPrompt, system: systemPrompt, onChunk: onStream
+        )
+      } else {
+        response = try await adapter.generate(prompt: explainPrompt, system: systemPrompt)
+      }
+
+      let reflection = AgentReflection(
+        taskSummary: "Explained \(intent.targets.joined(separator: ", "))",
+        insight: response, improvement: "", succeeded: true
+      )
+      debug("EXPLAIN → \(TokenBudget.estimate(response)) tokens")
+      try? reflectionStore.save(query: query, reflection: reflection)
+      metrics.tasksCompleted += 1
+      metrics.totalTokensUsed += memory.totalTokensUsed
+      metrics.totalLLMCalls += memory.llmCalls
+      return RunResult(memory: memory, reflection: reflection, wasStreamed: true)
+    }
+
+    // 2. Plan-related queries
+    let lower = query.lowercased()
+    let isPlanQuery = lower.hasPrefix("plan ") || lower.hasPrefix("outline ") ||
+      lower.hasPrefix("design ") || lower.hasPrefix("architect ") ||
+      lower.hasPrefix("scope ") || lower.hasPrefix("break down ") ||
+      lower.contains("what would it take") || lower.contains("what steps")
+    if isPlanQuery {
+      return try await runPlan(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+    }
+
+    // 3. Research queries (external APIs, docs, no local symbols found)
+    let (identifiers, _) = Self.extractSearchTerms(query)
+    let hasLocalSymbols = identifiers.contains { term in
+      projectIndex.contains { $0.symbolName.caseInsensitiveCompare(term) == .orderedSame }
+    }
+    let isExternalQuery = !hasLocalSymbols && (
+      lower.contains("documentation") || lower.contains("apple docs") ||
+      lower.hasPrefix("research ") || lower.contains("how does") && !hasLocalSymbols ||
+      lower.contains("what's new in")
+    )
+    if isExternalQuery && explicitContext.isEmpty {
+      return try await runResearch(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+    }
+
+    // 4. Default: deterministic search (most common answer sub-type)
+    return try await runSearch(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+  }
+
+  // MARK: - Search (internal)
 
   /// Cached rg availability (checked once).
   nonisolated(unsafe) private static var _hasRg: Bool?
@@ -1313,64 +1291,8 @@ public actor Orchestrator {
     )
   }
 
-  private func discoverStrategy(
-    query: String, intent: AgentIntent, memory: inout WorkingMemory
-  ) async throws -> AgentStrategy {
-    // Deterministic strategy for common intent/complexity combinations.
-    // Only fall through to LLM for unusual or complex cases.
-    if let fast = deterministicStrategy(intent: intent) {
-      debug("STRATEGY → deterministic: \(fast.approach)")
-      return fast
-    }
-
-    let prompt = Prompts.strategyPrompt(query: query, intent: intent)
-    memory.trackCall(estimatedTokens: TokenBudget.strategy.total)
-    return try await adapter.generateStructured(
-      prompt: prompt, system: Prompts.strategySystem, as: AgentStrategy.self
-    )
-  }
-
-  /// Maps common intent types to strategies without an LLM call.
-  /// Returns nil for complex or unusual tasks that need LLM reasoning.
-  private func deterministicStrategy(intent: AgentIntent) -> AgentStrategy? {
-    switch intent.taskType {
-    case "fix":
-      return AgentStrategy(
-        approach: "read-then-edit",
-        startingPoints: intent.targets,
-        risk: "Ensure fix doesn't break other code"
-      )
-    case "add" where intent.complexity == "simple":
-      return AgentStrategy(
-        approach: "decompose",
-        startingPoints: intent.targets,
-        risk: "Follow project conventions"
-      )
-    case "explain", "explore":
-      return AgentStrategy(
-        approach: "search-then-plan",
-        startingPoints: intent.targets,
-        risk: "none"
-      )
-    case "refactor":
-      return AgentStrategy(
-        approach: "read-then-edit",
-        startingPoints: intent.targets,
-        risk: "Preserve existing behavior"
-      )
-    case "test":
-      return AgentStrategy(
-        approach: "test-first",
-        startingPoints: intent.targets,
-        risk: "Test isolation"
-      )
-    default:
-      return nil
-    }
-  }
-
   private func plan(
-    query: String, intent: AgentIntent, strategy: AgentStrategy,
+    query: String, intent: AgentIntent,
     memory: inout WorkingMemory, explicitContext: String = ""
   ) async throws -> AgentPlan {
     // Deterministic plan: single-file creation (skip LLM planning)
@@ -1391,17 +1313,148 @@ public actor Orchestrator {
     } else {
       fileContext = contextPacker.pack(
         query: query, index: projectIndex,
-        budget: TokenBudget.plan.context, preferredFiles: strategy.startingPoints
+        budget: TokenBudget.plan.context, preferredFiles: intent.targets
       )
     }
     let prompt = Prompts.planPrompt(
-      query: query, intent: intent, strategy: strategy, fileContext: fileContext
+      query: query, intent: intent, fileContext: fileContext
     )
     memory.trackCall(estimatedTokens: TokenBudget.plan.total)
     return try await adapter.generateStructured(
       prompt: prompt, system: Prompts.planSystem, as: AgentPlan.self
     )
   }
+
+  // MARK: - ConcreteTask Execution
+
+  /// Execute a ConcreteTask — 1 LLM call per task with rich specification.
+  private func executeConcreteTask(
+    task: ConcreteTask, memory: inout WorkingMemory
+  ) async -> StepObservation {
+    switch task.action {
+    case .create:
+      return await executeCreateTask(task: task, memory: &memory)
+    case .edit:
+      return await executeEditTask(task: task, memory: &memory)
+    case .bash:
+      do {
+        let result = try await shell.execute(task.specification)
+        return StepObservation(
+          tool: "bash", outcome: result.exitCode == 0 ? .ok : .error,
+          keyFact: String(result.formatted(maxTokens: 120).prefix(120))
+        )
+      } catch {
+        return StepObservation(tool: "bash", outcome: .error, keyFact: "\(error)")
+      }
+    case .explain:
+      // Explain tasks return content via the reflection insight, not file operations
+      return StepObservation(tool: "explain", outcome: .ok, keyFact: "Explanation generated")
+    }
+  }
+
+  /// Execute a create task: generate file content with rich specification.
+  private func executeCreateTask(
+    task: ConcreteTask, memory: inout WorkingMemory
+  ) async -> StepObservation {
+    let target = task.target
+    guard !target.isEmpty else {
+      return StepObservation(tool: "create", outcome: .error, keyFact: "Empty target path")
+    }
+
+    // Check if file already exists
+    if files.exists(target) {
+      return StepObservation(tool: "create", outcome: .error,
+                             keyFact: "File already exists: \(target). Use edit to modify.")
+    }
+
+    do {
+      // Generate content — 1 LLM call with the rich specification
+      let system = Prompts.createSystem(domain: domain)
+      memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+      var content = try await adapter.generate(prompt: task.specification, system: system)
+      content = linter.cleanPlainTextOutput(content, filePath: target)
+
+      // Validate and fix (reuses existing infrastructure)
+      let validated = try await validateAndFix(content: content, filePath: target, memory: &memory)
+      content = validated.content
+      if let error = validated.error {
+        return StepObservation(tool: "create", outcome: .validationFailed, keyFact: error)
+      }
+
+      // Permission check
+      let decision = await askPermission(tool: "create", target: target, detail: "\(content.count) chars")
+      guard decision != .deny else {
+        return StepObservation(tool: "create", outcome: .denied, keyFact: "Permission denied")
+      }
+
+      // Write file
+      memory.touch(target)
+      metrics.filesModified += 1
+      try files.write(path: target, content: content)
+      lastDiffs.append(diffPreview.diffWrite(filePath: target, existingContent: nil, newContent: content))
+
+      // Post-write verification
+      let urls = Self.extractURLs(memory.query)
+      for url in urls {
+        if !content.contains(url) {
+          memory.addError("URL not found in output: \(url)")
+        }
+      }
+      if let missing = Self.verifyContent(content: content, query: memory.query) {
+        debug("Content verification: \(missing)")
+      }
+
+      return StepObservation(tool: "create", outcome: .ok,
+                             keyFact: "Created \(target) (\(content.count) chars)")
+    } catch {
+      return StepObservation(tool: "create", outcome: .error, keyFact: "\(error)")
+    }
+  }
+
+  /// Execute an edit task: generate replacement with existing content.
+  private func executeEditTask(
+    task: ConcreteTask, memory: inout WorkingMemory
+  ) async -> StepObservation {
+    let target = task.target
+    guard files.exists(target) else {
+      return StepObservation(tool: "edit", outcome: .error,
+                             keyFact: "File not found: \(target)")
+    }
+
+    do {
+      let system = "Output the complete modified file. No markdown fences, no explanation. \(domain.promptHint)"
+      memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+      var newContent = try await adapter.generate(prompt: task.specification, system: system)
+      newContent = linter.cleanPlainTextOutput(newContent, filePath: target)
+
+      // Validate
+      let validated = try await validateAndFix(content: newContent, filePath: target, memory: &memory)
+      newContent = validated.content
+      if let error = validated.error {
+        return StepObservation(tool: "edit", outcome: .validationFailed, keyFact: error)
+      }
+
+      // Permission check
+      let decision = await askPermission(tool: "write", target: target, detail: "\(newContent.count) chars")
+      guard decision != .deny else {
+        return StepObservation(tool: "edit", outcome: .denied, keyFact: "Permission denied")
+      }
+
+      // Write with diff
+      let existing = try? files.read(path: target, maxTokens: 2000)
+      memory.touch(target)
+      metrics.filesModified += 1
+      try files.write(path: target, content: newContent)
+      let diff = diffPreview.diffWrite(filePath: target, existingContent: existing, newContent: newContent)
+      lastDiffs.append(diff)
+
+      return StepObservation(tool: "edit", outcome: .ok, keyFact: "Edited \(target)")
+    } catch {
+      return StepObservation(tool: "edit", outcome: .error, keyFact: "\(error)")
+    }
+  }
+
+  // MARK: - Legacy PlanStep Execution
 
   private func executeStep(
     step: PlanStep, memory: inout WorkingMemory
@@ -1739,28 +1792,36 @@ public actor Orchestrator {
     }
   }
 
-  private func reflect(memory: inout WorkingMemory) async throws -> AgentReflection {
-    // Skip LLM reflection on clean success — saves 1 call.
-    // Only use LLM for failures/partial success where insight is valuable.
-    if memory.didSucceed && memory.errors.isEmpty {
-      let taskType = memory.intent?.taskType ?? "Task"
-      return AgentReflection(
-        taskSummary: "\(taskType) completed",
-        insight: "All \(memory.observations.count) steps succeeded.",
-        improvement: "",
-        succeeded: true
-      )
+  /// Fully deterministic reflection — no LLM call.
+  /// AFM's reflection was unreliable (always returned succeeded:true),
+  /// so we build the summary from actual observations.
+  private func reflect(memory: WorkingMemory) -> AgentReflection {
+    let succeeded = memory.didSucceed
+    let taskType = memory.intent?.taskType ?? "Task"
+
+    let summary: String
+    if succeeded {
+      summary = "\(taskType) completed"
+    } else {
+      let lastError = memory.errors.last ?? "unknown error"
+      summary = "\(taskType) failed: \(String(lastError.prefix(100)))"
     }
 
-    let prompt = Prompts.reflectPrompt(memory: memory)
-    memory.trackCall(estimatedTokens: TokenBudget.reflect.total)
-    var reflection = try await adapter.generateStructured(
-      prompt: prompt, system: Prompts.reflectSystem, as: AgentReflection.self
+    let insight: String
+    if succeeded && memory.errors.isEmpty {
+      insight = "All \(memory.observations.count) steps succeeded."
+    } else {
+      let steps = memory.observations.map { "[\($0.tool)] \($0.outcome.rawValue): \($0.keyFact)" }
+      insight = steps.joined(separator: "\n")
+    }
+
+    let improvement = memory.errors.isEmpty ? "" :
+      "Errors: \(memory.errors.suffix(3).joined(separator: "; "))"
+
+    return AgentReflection(
+      taskSummary: summary, insight: insight,
+      improvement: improvement, succeeded: succeeded
     )
-    // Override AFM's succeeded judgment with deterministic check —
-    // AFM almost always generates true regardless of actual outcomes.
-    reflection.succeeded = memory.didSucceed
-    return reflection
   }
 
   // MARK: - Permission Handling

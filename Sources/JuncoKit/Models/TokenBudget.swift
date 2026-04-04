@@ -14,11 +14,9 @@ public enum TokenBudget {
   // MARK: - Per-stage budgets
 
   public static let classify = StageBudget(system: 100, context: 200, prompt: 100, generation: 400)
-  public static let strategy = StageBudget(system: 100, context: 200, prompt: 100, generation: 400)
   public static let plan = StageBudget(system: 150, context: 500, prompt: 150, generation: 800)
   public static let execute = StageBudget(system: 150, context: 800, prompt: 200, generation: 1500)
   public static let observe = StageBudget(system: 80, context: 600, prompt: 80, generation: 300)
-  public static let reflect = StageBudget(system: 100, context: 300, prompt: 100, generation: 400)
 
   // MARK: - Estimation
 

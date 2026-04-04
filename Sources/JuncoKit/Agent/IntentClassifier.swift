@@ -85,7 +85,8 @@ public struct IntentClassifier: @unchecked Sendable {
   }
 
   /// Seed queries for each mode — used to compute prototype embeddings.
-  /// ~20 per mode, covering diverse phrasings.
+  /// Build: imperative actions that modify files.
+  /// Answer: questions, searches, explanations, plans, research.
   private static let modePrototypeSeeds: [String: [String]] = [
     "build": [
       "fix the bug in auth", "create a new Swift file", "add error handling",
@@ -96,36 +97,30 @@ public struct IntentClassifier: @unchecked Sendable {
       "fix the memory leak", "change the return type", "extract into a protocol",
       "needs error handling", "missing import",
     ],
-    "search": [
+    "answer": [
+      // Search queries
       "where is AgentMode defined?", "what does the Orchestrator do?",
       "find TokenBudget", "show me the error handling", "how many Swift files?",
       "what protocols exist?", "where is the entry point?", "count the test cases",
       "who calls classify?", "what is the default timeout?",
       "list all enums", "where is the build target?", "find the config values",
-      "what test suites exist?", "what connects Spinner to Orchestrator?",
       "which file has the login logic?", "what parameters does run take?",
-      "where is the validation logic?", "show me the spinner code",
       "what dependencies does this project use?",
-    ],
-    "plan": [
+      // Plan queries
       "plan how to add OAuth", "outline the migration steps",
       "design a caching strategy", "how should I structure the auth module?",
       "what would it take to add dark mode?", "scope out the refactor",
       "break down the feature", "architect the new module",
-      "what steps would it take to support iPad?", "propose an approach",
-      "plan migrating from UIKit to SwiftUI", "outline the database changes",
-      "design how the search should work", "estimate the complexity",
-      "help me think through the migration",
-    ],
-    "research": [
+      // Research queries
       "research SwiftData API", "how does Apple's Keychain work?",
       "what's new in Swift 6?", "documentation for URLSession",
-      "look up the Combine framework", "what WWDC talks cover SwiftData?",
-      "compare Core Data vs SwiftData", "how does async/await work in Swift?",
+      "look up the Combine framework", "how does async/await work in Swift?",
       "research the Observable macro", "docs for MapKit",
-      "how does CloudKit sync work?", "is there a better framework for this?",
-      "what are Apple's guidelines for accessibility?", "check the developer docs",
+      "how does CloudKit sync work?", "check the developer docs",
       "how to implement push notifications?",
+      // Explain queries
+      "explain this code", "what does this function do?", "how does this work?",
+      "why is this structured this way?", "describe the architecture",
     ],
   ]
 

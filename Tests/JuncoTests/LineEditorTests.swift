@@ -283,17 +283,15 @@ struct LineEditorTests {
     let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
     let result = editor.readLineWithMode(driver: vt)
 
-    #expect(result.mode == .search)
+    #expect(result.mode == .answer)
     #expect(result.text == "q")
   }
 
   @Test("shift+tab cycles through all modes and wraps")
   func shiftTabFullCycle() {
-    // build → search → plan → research → build
+    // build → answer → build (wrap)
     let vt = VirtualTerminalDriver(keys: [
-      .shiftTab,  // → search
-      .shiftTab,  // → plan
-      .shiftTab,  // → research
+      .shiftTab,  // → answer
       .shiftTab,  // → build (wrap)
       .char("x"),
       .enter,
@@ -304,18 +302,17 @@ struct LineEditorTests {
     #expect(result.mode == .build, "Full cycle should return to build")
   }
 
-  @Test("shift+tab to plan mode returns plan")
-  func shiftTabPlanMode() {
+  @Test("shift+tab to answer mode returns answer")
+  func shiftTabAnswerMode() {
     let vt = VirtualTerminalDriver(keys: [
-      .shiftTab,  // → search
-      .shiftTab,  // → plan
+      .shiftTab,  // → answer
       .char("x"),
       .enter,
     ])
     let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
     let result = editor.readLineWithMode(driver: vt)
 
-    #expect(result.mode == .plan)
+    #expect(result.mode == .answer)
     #expect(result.text == "x")
   }
 
@@ -331,7 +328,7 @@ struct LineEditorTests {
     let result = editor.readLineWithMode(driver: vt)
 
     #expect(result.text == "hi!")
-    #expect(result.mode == .search)
+    #expect(result.mode == .answer)
   }
 
   @Test("first escape keeps text, second escape clears, typing resumes")
@@ -394,7 +391,7 @@ struct LineEditorTests {
     let editor = LineEditor(prompt: "> ", completers: [completer], showModeBar: true)
     let result = editor.readLineWithMode(driver: vt)
 
-    #expect(result.mode == .search, "Shift+tab should cycle mode")
+    #expect(result.mode == .answer, "Shift+tab should cycle mode")
     #expect(result.text == "@main.swift", "Completion should still work")
   }
 
@@ -414,14 +411,13 @@ struct LineEditorTests {
   @Test("ctrlC preserves current mode in result")
   func ctrlCPreservesMode() {
     let vt = VirtualTerminalDriver(keys: [
-      .shiftTab,  // → search
-      .shiftTab,  // → plan
+      .shiftTab,  // → answer
       .ctrlC,
     ])
     let editor = LineEditor(prompt: "> ", completers: [], showModeBar: true)
     let result = editor.readLineWithMode(driver: vt)
 
     #expect(result.text == nil)
-    #expect(result.mode == .plan, "Mode should be preserved on cancel")
+    #expect(result.mode == .answer, "Mode should be preserved on cancel")
   }
 }

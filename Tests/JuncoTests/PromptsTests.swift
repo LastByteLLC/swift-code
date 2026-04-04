@@ -34,14 +34,4 @@ struct PromptsTests {
     #expect(prompt.contains("auth.swift"))
   }
 
-  @Test("reflect prompt includes task details")
-  func reflectPrompt() {
-    var memory = WorkingMemory(query: "test task")
-    memory.addError("something broke")
-    memory.touch("file.swift")
-    let prompt = Prompts.reflectPrompt(memory: memory)
-    #expect(prompt.contains("test task"))
-    #expect(prompt.contains("something broke"))
-    #expect(prompt.contains("file.swift"))
-  }
 }

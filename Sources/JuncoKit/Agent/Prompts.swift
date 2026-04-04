@@ -17,40 +17,23 @@ public enum Prompts {
 
   public static let modeClassifySystem = """
     Classify this query into exactly one mode: \
-    build (CREATE, FIX, MODIFY, or TEST code — an imperative action), \
-    search (FIND something in THIS project's code — where is X, what does X do, how many X), \
-    plan (DESIGN an approach or outline steps before building), \
-    research (look up EXTERNAL info not in the project — third-party APIs, Apple docs, concepts). \
-    IMPORTANT: If the query asks about code, files, functions, types, config values, errors, \
-    or tests in THIS project, use search. Use research ONLY for things outside the project.
+    build (CREATE, FIX, MODIFY, or TEST code — an imperative action that changes files), \
+    answer (EXPLAIN, FIND, SEARCH, PLAN, or RESEARCH — any query that reads code or provides information). \
+    If the query asks a question, wants an explanation, requests a search, or needs external info, use answer. \
+    Only use build if the user wants to create, modify, or delete files.
     """
 
   // MARK: - Classify
 
   public static let classifySystem = """
     You classify coding tasks. Respond with the structured fields only. \
-    mode: build (create/fix/modify/test code), search (find/locate in codebase), \
-    plan (design approach/outline steps), research (look up external docs/APIs).
+    mode: build (create/fix/modify/test code) or answer (explain/find/plan/research).
     """
 
   public static func classifyPrompt(query: String, fileHints: String) -> String {
     """
     Query: \(query)
     Project files: \(fileHints)
-    """
-  }
-
-  // MARK: - Strategy
-
-  public static let strategySystem = """
-    You choose a coding strategy. Pick the best approach for the task.
-    """
-
-  public static func strategyPrompt(query: String, intent: AgentIntent) -> String {
-    """
-    Task: \(query)
-    Domain: \(intent.domain) | Type: \(intent.taskType) | Complexity: \(intent.complexity)
-    Targets: \(intent.targets.joined(separator: ", "))
     """
   }
 
@@ -69,15 +52,12 @@ public enum Prompts {
   public static func planPrompt(
     query: String,
     intent: AgentIntent,
-    strategy: AgentStrategy,
     fileContext: String
   ) -> String {
     """
     Task: \(query)
     Domain: \(intent.domain) | Type: \(intent.taskType)
-    Strategy: \(strategy.approach)
-    Start at: \(strategy.startingPoints.joined(separator: ", "))
-    Watch for: \(strategy.risk)
+    Targets: \(intent.targets.joined(separator: ", "))
     \(fileContext)
     """
   }
@@ -143,6 +123,19 @@ public enum Prompts {
 
   // MARK: - Observe
 
+  // MARK: - Domain-Aware Create/Edit Prompts
+
+  /// System prompt for file creation, tailored to the project domain.
+  public static func createSystem(domain: DomainConfig) -> String {
+    let base = "Output only the file content. No markdown fences, no explanation."
+    switch domain.kind {
+    case .swift:
+      return "\(base) Write complete, compilable Swift. Use proper imports. Follow Swift naming conventions. \(domain.promptHint)"
+    case .general:
+      return "\(base) \(domain.promptHint)"
+    }
+  }
+
   public static let observeSystem = """
     Summarize this tool output concisely. Extract key facts relevant to the task.
     """
@@ -160,18 +153,4 @@ public enum Prompts {
     """
   }
 
-  // MARK: - Reflect
-
-  public static let reflectSystem = """
-    Reflect on the completed task. What worked? What would you do differently?
-    """
-
-  public static func reflectPrompt(memory: WorkingMemory) -> String {
-    """
-    Task: \(memory.query)
-    Steps completed: \(memory.currentStepIndex)
-    Errors: \(memory.errors.isEmpty ? "none" : memory.errors.joined(separator: "; "))
-    Files touched: \(memory.touchedFiles.sorted().joined(separator: ", "))
-    """
-  }
 }

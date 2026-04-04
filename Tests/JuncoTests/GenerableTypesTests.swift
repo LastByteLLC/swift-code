@@ -70,19 +70,6 @@ struct GenerableTypesTests {
     #expect(decoded.taskSummary == "Fixed login bug")
   }
 
-  @Test("AgentStrategy round-trips")
-  func strategyCodable() throws {
-    let strategy = AgentStrategy(
-      approach: "debug-trace",
-      startingPoints: ["error.log", "main.swift"],
-      risk: "may need system restart"
-    )
-    let data = try JSONEncoder().encode(strategy)
-    let decoded = try JSONDecoder().decode(AgentStrategy.self, from: data)
-    #expect(decoded.approach == "debug-trace")
-    #expect(decoded.startingPoints.count == 2)
-  }
-
   @Test("CreateParams round-trips")
   func createParamsCodable() throws {
     let params = CreateParams(filePath: "index.html", content: "<h1>Hello</h1>")

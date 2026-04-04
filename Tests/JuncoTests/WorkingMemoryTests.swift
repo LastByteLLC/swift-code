@@ -129,9 +129,6 @@ struct WorkingMemoryTests {
       domain: "swift", taskType: "refactor", complexity: "complex",
       mode: "build", targets: ["Auth.swift", "Session.swift", "Token.swift"]
     )
-    memory.strategy = AgentStrategy(
-      approach: "decompose", startingPoints: ["Auth.swift"], risk: "breaking changes"
-    )
     for i in 0..<5 {
       memory.addObservation(StepObservation(
         tool: "edit", outcome: .ok, keyFact: "updated function \(i)"

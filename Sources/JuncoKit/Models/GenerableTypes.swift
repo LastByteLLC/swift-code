@@ -14,18 +14,15 @@ public enum ToolName: String, Sendable, Codable, CaseIterable {
 }
 
 /// Agent operating mode — determines which pipeline variant runs.
+/// Build modifies files; answer reads + responds (search, explain, plan, research).
 public enum AgentMode: String, Sendable, Codable, CaseIterable {
-  case build     // Default: create, fix, refactor, test code
-  case search    // Find things using natural language
-  case plan      // Disambiguate prompts into structured plans
-  case research  // Web search + fetch for API docs and facts
+  case build     // Create, fix, refactor, test code
+  case answer    // Explain, search, plan, research — reads + responds
 
   public var icon: String {
     switch self {
-    case .build:    return "⏵⏵"
-    case .search:   return "⌕"
-    case .plan:     return "⏸"
-    case .research: return "ⓘ"
+    case .build:  return "⏵⏵"
+    case .answer: return "⌕"
     }
   }
 }
@@ -42,7 +39,7 @@ public enum StepOutcome: String, Sendable, Codable {
 
 @Generable
 public struct ModeClassification: Codable, Sendable {
-  @Guide(description: "build, search, plan, or research")
+  @Guide(description: "build or answer")
   public var mode: String
 }
 
@@ -59,7 +56,7 @@ public struct AgentIntent: Codable, Sendable {
   @Guide(description: "simple, moderate, or complex")
   public var complexity: String
 
-  @Guide(description: "build, search, plan, or research")
+  @Guide(description: "build or answer")
   public var mode: String
 
   public var targets: [String]
@@ -67,23 +64,17 @@ public struct AgentIntent: Codable, Sendable {
 
 extension AgentIntent {
   /// Typed mode with fallback to .build for unknown values.
+  /// Maps legacy mode strings (search, plan, research) to .answer.
   public var agentMode: AgentMode {
-    AgentMode(rawValue: mode.lowercased()) ?? .build
+    let m = mode.lowercased()
+    if let direct = AgentMode(rawValue: m) { return direct }
+    // Legacy mapping: old 4-mode values → new 2-mode values
+    if ["search", "plan", "research"].contains(m) { return .answer }
+    return .build
   }
 }
 
-// MARK: - Stage 2: Strategy Selection
-
-@Generable
-public struct AgentStrategy: Codable, Sendable {
-  @Guide(description: "decompose, debug-trace, test-first, read-then-edit, or search-then-plan")
-  public var approach: String
-
-  public var startingPoints: [String]
-  public var risk: String
-}
-
-// MARK: - Stage 3: Planning
+// MARK: - Stage 2: Planning
 
 @Generable
 public struct AgentPlan: Codable, Sendable {

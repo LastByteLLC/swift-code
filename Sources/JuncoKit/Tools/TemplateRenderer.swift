@@ -78,6 +78,15 @@ public struct XcconfigIntent: Codable, Sendable {
   @Guide(description: "Build settings as KEY = VALUE pairs") public var settings: [String]
 }
 
+// MARK: - SwiftUI App Entry Point
+
+@Generable
+public struct AppEntryPointIntent: Codable, Sendable {
+  @Guide(description: "App struct name like PodcastApp") public var appName: String
+  @Guide(description: "Root view type name like ContentView or PodcastListView") public var rootView: String
+  @Guide(description: "State properties like @State private var viewModel = PodcastViewModel(), empty if none") public var stateProperties: [String]
+}
+
 // MARK: - Swift Test File
 
 @Generable
@@ -122,6 +131,8 @@ public struct TemplateRenderer: Sendable {
       return "Determine which patterns to ignore. For Swift projects, include swiftPackage and xcode. Always include macOS."
     } else if name.hasSuffix(".xcconfig") {
       return "Generate xcconfig build settings as KEY = VALUE pairs."
+    } else if name.hasSuffix("app.swift") {
+      return "Determine the app name and root view for this SwiftUI app entry point."
     }
     return nil
   }
@@ -154,6 +165,9 @@ public struct TemplateRenderer: Sendable {
     } else if name.hasSuffix(".xcconfig") {
       let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: XcconfigIntent.self, options: nil)
       return renderXcconfig(intent)
+    } else if name.hasSuffix("app.swift") {
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: AppEntryPointIntent.self, options: nil)
+      return renderAppEntryPoint(intent)
     }
     return nil
   }
@@ -316,6 +330,30 @@ public struct TemplateRenderer: Sendable {
     for setting in intent.settings where !setting.isEmpty {
       lines.append(setting)
     }
+    return lines.joined(separator: "\n") + "\n"
+  }
+
+  // MARK: - SwiftUI App Entry Point
+
+  public func renderAppEntryPoint(_ intent: AppEntryPointIntent) -> String {
+    var lines = [
+      "import SwiftUI",
+      "",
+      "@main",
+      "struct \(intent.appName): App {",
+    ]
+    for prop in intent.stateProperties where !prop.isEmpty {
+      lines.append("    \(prop)")
+    }
+    if !intent.stateProperties.filter({ !$0.isEmpty }).isEmpty {
+      lines.append("")
+    }
+    lines.append("    var body: some Scene {")
+    lines.append("        WindowGroup {")
+    lines.append("            \(intent.rootView)()")
+    lines.append("        }")
+    lines.append("    }")
+    lines.append("}")
     return lines.joined(separator: "\n") + "\n"
   }
 

@@ -1259,12 +1259,38 @@ public actor Orchestrator {
     }
   }
 
+  /// Resolve target files from the query using basename, full-path, and regex matching.
+  private func resolveTargets(query: String, explicitTargets: [String]) -> [String] {
+    if !explicitTargets.isEmpty { return explicitTargets }
+    let fileList = files.listFiles()
+    // 1. Basename matching (existing files whose name appears in query)
+    var matched = fileList.filter { path in
+      query.lowercased().contains((path as NSString).lastPathComponent.lowercased())
+    }
+    // 2. Full-path matching (e.g. "Sources/PodcastApp/Models.swift")
+    for file in fileList where query.contains(file) && !matched.contains(file) {
+      matched.append(file)
+    }
+    // 3. Regex for .swift paths mentioned in query (may be new files to create)
+    if let regex = try? NSRegularExpression(pattern: #"(?:Sources|Tests)/[\w/]+\.swift"#) {
+      let range = NSRange(query.startIndex..., in: query)
+      for match in regex.matches(in: query, range: range) {
+        if let r = Range(match.range, in: query) {
+          let path = String(query[r])
+          if !matched.contains(path) { matched.append(path) }
+        }
+      }
+    }
+    return matched.isEmpty ? Array(fileList.prefix(3)) : matched
+  }
+
   private func classify(
     query: String, memory: inout WorkingMemory, explicitTargets: [String] = []
   ) async throws -> AgentIntent {
     let firstWord = query.lowercased().split(separator: " ").first.map(String.init) ?? ""
     let keywordOverride = Self.intentKeywords[firstWord]
 
+    // Tier 1: ML classifier with high confidence
     if let mlResult = intentClassifier.classifyWithConfidence(query), mlResult.confidence > Config.mlClassifierConfidence {
       let finalLabel = keywordOverride ?? mlResult.label
       if keywordOverride != nil && keywordOverride != mlResult.label {
@@ -1274,31 +1300,7 @@ public actor Orchestrator {
       }
       metrics.mlClassifications += 1
 
-      let targets: [String]
-      if !explicitTargets.isEmpty {
-        targets = explicitTargets
-      } else {
-        let fileList = files.listFiles()
-        // 1. Basename matching (existing files whose name appears in query)
-        var matched = fileList.filter { path in
-          query.lowercased().contains((path as NSString).lastPathComponent.lowercased())
-        }
-        // 2. Full-path matching (e.g. "Sources/PodcastApp/Models.swift")
-        for file in fileList where query.contains(file) && !matched.contains(file) {
-          matched.append(file)
-        }
-        // 3. Regex for .swift paths mentioned in query (may be new files to create)
-        if let regex = try? NSRegularExpression(pattern: #"(?:Sources|Tests)/[\w/]+\.swift"#) {
-          let range = NSRange(query.startIndex..., in: query)
-          for match in regex.matches(in: query, range: range) {
-            if let r = Range(match.range, in: query) {
-              let path = String(query[r])
-              if !matched.contains(path) { matched.append(path) }
-            }
-          }
-        }
-        targets = matched.isEmpty ? Array(fileList.prefix(3)) : matched
-      }
+      let targets = resolveTargets(query: query, explicitTargets: explicitTargets)
 
       // Determine mode: keyword short-circuit for unambiguous build verbs
       let detectedMode: AgentMode
@@ -1326,12 +1328,24 @@ public actor Orchestrator {
       )
     }
 
-    debug("ML classifier: low confidence, falling back to LLM")
+    // Tier 2: Deterministic construction when keyword provides taskType
+    // Saves ~800 tokens + 1.5s latency by avoiding the LLM classify call.
+    if let taskType = keywordOverride {
+      let mode: AgentMode = Self.buildTaskTypes.contains(taskType) ? .build : .answer
+      let targets = resolveTargets(query: query, explicitTargets: explicitTargets)
 
-    // Keyword mode short-circuit: skip LLM mode classification for obvious build verbs
-    if Self.buildModeKeywords.contains(firstWord) {
-      debug("Mode: build (keyword override: \(firstWord), skipping LLM mode classification)")
+      debug("Deterministic classify: \(taskType)/\(mode.rawValue) (keyword: \(firstWord))")
+      metrics.deterministicClassifications += 1
+
+      return AgentIntent(
+        domain: domain.kind.rawValue, taskType: taskType,
+        complexity: targets.count > 2 ? "moderate" : "simple",
+        mode: mode.rawValue, targets: targets
+      )
     }
+
+    // Tier 3: Full LLM fallback for genuinely ambiguous queries
+    debug("ML classifier: low confidence, no keyword match — falling back to LLM")
 
     let fileList = files.listFiles().prefix(25).joined(separator: "\n")
     let prompt = Prompts.classifyPrompt(
@@ -1343,13 +1357,7 @@ public actor Orchestrator {
     )
 
     // Post-classification guards for LLM fallback
-    if Self.buildModeKeywords.contains(firstWord) && intent.agentMode == .answer {
-      intent = AgentIntent(
-        domain: intent.domain, taskType: intent.taskType,
-        complexity: intent.complexity, mode: "build", targets: intent.targets
-      )
-      debug("Mode override: answer → build (keyword: \(firstWord))")
-    } else if Self.buildTaskTypes.contains(intent.taskType) && intent.agentMode == .answer {
+    if Self.buildTaskTypes.contains(intent.taskType) && intent.agentMode == .answer {
       intent = AgentIntent(
         domain: intent.domain, taskType: intent.taskType,
         complexity: intent.complexity, mode: "build", targets: intent.targets
@@ -1437,13 +1445,34 @@ public actor Orchestrator {
     }
 
     do {
-      // Generate content — 1 LLM call with the rich specification
-      let system = Prompts.createSystem(domain: domain)
-      memory.trackCall(estimatedTokens: TokenBudget.execute.total)
-      var content = try await adapter.generate(prompt: task.specification, system: system)
-      content = linter.cleanPlainTextOutput(content, filePath: target)
+      var content: String
 
-      // Validate and fix (reuses existing infrastructure)
+      // Route 1: Template (App entry points, Package.swift, entitlements, etc.)
+      if templateRenderer.shouldUseTemplate(filePath: target),
+         let rendered = try await templateRenderer.resolveTemplate(
+           filePath: target, prompt: task.specification, adapter: adapter) {
+        debug("Template route for \(target)")
+        content = rendered
+      }
+      // Route 2: Plain generation with two-phase overflow fallback
+      else {
+        do {
+          let system = Prompts.createSystem(domain: domain)
+          memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+          content = try await adapter.generate(prompt: task.specification, system: system)
+          content = linter.cleanPlainTextOutput(content, filePath: target)
+        } catch let error as LLMError {
+          if case .contextOverflow = error, target.hasSuffix(".swift") {
+            debug("Context overflow on create — falling back to two-phase generation")
+            let step = PlanStep(instruction: task.specification, tool: "create", target: target)
+            content = try await generateTwoPhase(step: step, memory: &memory)
+          } else {
+            throw error
+          }
+        }
+      }
+
+      // Validate and fix (shared across all routes)
       let validated = try await validateAndFix(content: content, filePath: target, memory: &memory)
       content = validated.content
       if let error = validated.error {
@@ -2142,4 +2171,5 @@ public struct SessionMetrics: Sendable {
   public var filesModified: Int = 0
   public var bashCommandsRun: Int = 0
   public var mlClassifications: Int = 0
+  public var deterministicClassifications: Int = 0
 }

@@ -55,10 +55,12 @@ public struct TaskDescription: Codable, Sendable {
 public struct TaskResolver: Sendable {
   private let files: FileTools
   private let contextPacker: ContextPacker
+  private let scratchpad: Scratchpad
 
   public init(workingDirectory: String) {
     self.files = FileTools(workingDirectory: workingDirectory)
     self.contextPacker = ContextPacker(workingDirectory: workingDirectory)
+    self.scratchpad = Scratchpad(projectDirectory: workingDirectory)
   }
 
   /// Resolve a query into concrete tasks.
@@ -98,6 +100,14 @@ public struct TaskResolver: Sendable {
     explicitContext: String
   ) -> [ConcreteTask]? {
     switch intent.taskType {
+
+    // Recipe 0: Multi-file app scaffold — "build/create a X app"
+    // Must check BEFORE single-file recipe since scaffold queries have no explicit targets.
+    case "add" where Self.isAppScopeQuery(query),
+         "build" where Self.isAppScopeQuery(query):
+      return buildAppScaffoldTasks(
+        query: query, snapshot: snapshot, explicitContext: explicitContext
+      )
 
     // Recipe 1: Single file create — "add" with non-existent targets
     case "add":
@@ -177,6 +187,9 @@ public struct TaskResolver: Sendable {
     let typeBlock = snapshot.typeSignatureBlock(budget: 150)
     if !typeBlock.isEmpty {
       spec += "\n\(typeBlock)\n"
+    } else if let cached = scratchpad.readAll()["generated_types"], !cached.isEmpty {
+      // Cross-turn fallback: use type manifest from previous build session
+      spec += "\n\(TokenBudget.truncate(cached, toTokens: 150))\n"
     }
 
     // Add explicit context (@-files, URLs)
@@ -190,26 +203,71 @@ public struct TaskResolver: Sendable {
       spec += "\nIMPORTANT: Use these exact URLs: \(urls.joined(separator: ", "))\n"
     }
 
-    // Add role-based exemplar for non-template files (primarily views)
-    if let exemplar = Self.exemplar(for: MicroSkill.inferFileRole(target)) {
-      spec += "\n\(exemplar)\n"
+    // Add personalized exemplar using actual type names from the snapshot.
+    // If the snapshot has enough info, generate exemplar with real property names.
+    // Otherwise fall back to the generic pattern.
+    let role = MicroSkill.inferFileRole(target)
+    if let personalized = Self.personalizedExemplar(for: role, snapshot: snapshot) {
+      spec += "\n\(personalized)\n"
+    } else if let generic = Self.exemplar(for: role) {
+      spec += "\n\(generic)\n"
     }
 
     return spec
   }
 
-  /// Compact, correct exemplar for a file role. Gives the LLM a pattern to follow.
+  /// Generate an exemplar using actual property/method names from the project snapshot.
+  /// Eliminates the prompt conflict where the model copies generic names from a template
+  /// instead of adapting to the real types.
+  static func personalizedExemplar(for role: String, snapshot: ProjectSnapshot) -> String? {
+    guard role == "view" else { return nil }
+
+    // Find a ViewModel and its associated model type
+    let vms = snapshot.services.filter { $0.name.contains("ViewModel") } +
+              snapshot.models.filter { $0.name.contains("ViewModel") }
+    guard let vm = vms.first else { return nil }
+
+    // Find a model type (not ViewModel, not Service)
+    let models = snapshot.models.filter { !$0.name.contains("ViewModel") }
+    guard let model = models.first else { return nil }
+
+    let listProp = vm.properties.first(where: { $0.contains("[") }) ?? vm.properties.first ?? "items"
+    let titleProp = model.properties.first ?? "name"
+    let subtitleProp = model.properties.count > 1 ? model.properties[1] : ""
+    let loadMethod = vm.methods.first ?? "load"
+    let searchProp = vm.properties.first(where: { $0.lowercased().contains("search") })
+
+    var exemplar = """
+      // PATTERN — use these exact property names:
+      // @State var viewModel = \(vm.name)()
+      // List(viewModel.\(listProp)) { item in
+      //   Text(item.\(titleProp))
+      """
+    if !subtitleProp.isEmpty {
+      exemplar += "\n//   Text(item.\(subtitleProp)).foregroundStyle(.secondary)"
+    }
+    exemplar += "\n// }"
+    exemplar += "\n// .navigationTitle(\"...\")"
+    if let search = searchProp {
+      exemplar += "\n// .searchable(text: $viewModel.\(search))"
+    }
+    exemplar += "\n// .task { await viewModel.\(loadMethod)() }"
+
+    return exemplar
+  }
+
+  /// Generic exemplar for a file role (fallback when no snapshot data available).
   static func exemplar(for role: String) -> String? {
     switch role {
     case "view":
       return """
         // PATTERN — follow this structure:
         // struct XView: View {
-        //   var viewModel: XViewModel
+        //   @State var viewModel = XViewModel()
         //   var body: some View {
         //     NavigationStack {
         //       List(viewModel.items) { item in
-        //         NavigationLink(value: item) { Text(item.name) }
+        //         Text(item.name)
         //       }
         //       .navigationTitle("Title")
         //       .task { await viewModel.load() }
@@ -389,5 +447,117 @@ public struct TaskResolver: Sendable {
     return detector.matches(in: text, range: range).compactMap { match in
       Range(match.range, in: text).map { String(text[$0]) }
     }
+  }
+
+  // MARK: - App Scaffold Recipe
+
+  /// Detect queries that describe an entire app rather than a single file.
+  static func isAppScopeQuery(_ query: String) -> Bool {
+    let lower = query.lowercased()
+    let triggers = ["build a", "create a", "make a", "build an", "create an", "make an"]
+    let indicators = ["app", "application", "project"]
+    let hasTrigger = triggers.contains(where: { lower.contains($0) })
+    let hasIndicator = indicators.contains(where: { lower.contains($0) })
+    return hasTrigger && hasIndicator
+  }
+
+  /// Extract the primary domain noun from an app creation query.
+  /// "build a podcast app" → "podcast", "create a weather application" → "weather"
+  static func inferAppDomain(_ query: String) -> String {
+    let lower = query.lowercased()
+    let patterns = [
+      #"(?:build|create|make)\s+(?:a|an)\s+(\w+)\s+(?:app|application|project)"#,
+    ]
+    for pattern in patterns {
+      if let regex = try? NSRegularExpression(pattern: pattern),
+         let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
+         let range = Range(match.range(at: 1), in: lower) {
+        return String(lower[range])
+      }
+    }
+    return "app"
+  }
+
+  /// Generate ordered create tasks for an app scaffold.
+  /// Order: Model → Service → ViewModel → View → App entry point.
+  /// Only creates files that don't already exist.
+  private func buildAppScaffoldTasks(
+    query: String,
+    snapshot: ProjectSnapshot,
+    explicitContext: String
+  ) -> [ConcreteTask] {
+    let domain = Self.inferAppDomain(query)
+    let cap = domain.prefix(1).uppercased() + domain.dropFirst()
+
+    // Detect source directory from Package.swift target path or existing Swift files
+    let sourceDir: String
+    if let packageContent = try? files.read(path: "Package.swift", maxTokens: 400),
+       let pathMatch = packageContent.firstMatch(of: /path:\s*"([^"]+)"/) {
+      let targetPath = String(pathMatch.1)
+      sourceDir = targetPath.hasSuffix("/") ? targetPath : targetPath + "/"
+    } else {
+      let swiftFiles = files.listFiles(extensions: ["swift"]).filter { !$0.contains("Package.swift") }
+      if let first = swiftFiles.first {
+        let dir = (first as NSString).deletingLastPathComponent
+        sourceDir = dir.isEmpty ? "" : (dir.hasSuffix("/") ? dir : dir + "/")
+      } else {
+        sourceDir = "Sources/"
+      }
+    }
+
+    // Extract URLs from the original query for the service spec
+    let urls = extractURLs(query)
+    let urlHint = urls.isEmpty ? "" : "\nIMPORTANT: Use this exact URL: \(urls.first ?? "")"
+
+    // Generate narrow, file-specific tasks. Each spec is tailored so the model
+    // (and template system) generates ONLY the content for that file.
+    var tasks: [ConcreteTask] = []
+
+    // Task 1: Model (use "Models" in filename so template router picks it up)
+    let modelTarget = "\(sourceDir)\(cap)Models.swift"
+    if !files.exists(modelTarget) {
+      tasks.append(ConcreteTask(
+        action: .create, target: modelTarget,
+        specification: "Create \(modelTarget).\n\nstruct \(cap): Codable, Identifiable with properties relevant to a \(domain). Include var id = UUID()."
+      ))
+    }
+
+    // Task 2: Service (short spec to fit within 4K with template schema overhead)
+    let serviceTarget = "\(sourceDir)\(cap)Service.swift"
+    if !files.exists(serviceTarget) {
+      tasks.append(ConcreteTask(
+        action: .create, target: serviceTarget,
+        specification: "Create \(serviceTarget). actor \(cap)Service. Method: search\(cap)s(term: String) -> [\(cap)].\(urlHint) Params: term, media=\(domain)."
+      ))
+    }
+
+    // Task 3: ViewModel
+    let vmTarget = "\(sourceDir)\(cap)ViewModel.swift"
+    if !files.exists(vmTarget) {
+      tasks.append(ConcreteTask(
+        action: .create, target: vmTarget,
+        specification: "Create \(vmTarget).\n\n@Observable class \(cap)ViewModel with var \(domain)s: [\(cap)] = [] and var searchText: String = \"\". Method: func search() calls \(cap)Service().search\(cap)s(term: searchText) and assigns to \(domain)s."
+      ))
+    }
+
+    // Task 4: ListView
+    let viewTarget = "\(sourceDir)\(cap)ListView.swift"
+    if !files.exists(viewTarget) {
+      tasks.append(ConcreteTask(
+        action: .create, target: viewTarget,
+        specification: "Create \(viewTarget).\n\nSwiftUI View with @State var viewModel = \(cap)ViewModel(). List of viewModel.\(domain)s. Show each item's first two properties. Add .searchable(text: $viewModel.searchText) and .task { await viewModel.search() }. Navigation title: \"\(cap)s\"."
+      ))
+    }
+
+    // Task 5: App entry point
+    let appTarget = "\(sourceDir)\(cap)App.swift"
+    if !files.exists(appTarget) {
+      tasks.append(ConcreteTask(
+        action: .create, target: appTarget,
+        specification: "Create \(appTarget).\n\n@main App struct \(cap)App with WindowGroup containing \(cap)ListView()."
+      ))
+    }
+
+    return tasks
   }
 }

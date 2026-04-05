@@ -8,6 +8,8 @@
 // Inspired by ContextCore's progressive compression strategy.
 
 import Foundation
+import SwiftTreeSitter
+import TreeSitterSwiftGrammar
 
 /// Compression fidelity tier.
 public enum CompressionTier: String, Sendable {
@@ -47,8 +49,8 @@ public struct ProgressiveCompressor: Sendable {
       )
     }
 
-    // Gist: keep declarations, drop bodies
-    let gist = codeGist(code)
+    // Gist: keep declarations, drop bodies (AST-first, regex fallback)
+    let gist = codeGistAST(code) ?? codeGist(code)
     let gistTokens = TokenBudget.estimate(gist)
     if gistTokens <= target {
       return CompressedContent(
@@ -97,7 +99,141 @@ public struct ProgressiveCompressor: Sendable {
     return results
   }
 
-  // MARK: - Code Gist (~0.25x)
+  // MARK: - AST-Based Code Gist (~0.25x)
+
+  /// Keep declarations and property lines using TreeSitter AST.
+  /// Returns nil if parsing fails (caller falls back to regex-based codeGist).
+  /// Correctly handles multi-line signatures, where clauses, and nested types.
+  public func codeGistAST(_ code: String) -> String? {
+    let language = Language(language: tree_sitter_swift())
+    let parser = Parser()
+    do { try parser.setLanguage(language) } catch { return nil }
+    guard let tree = parser.parse(code) else { return nil }
+    guard let root = tree.rootNode else { return nil }
+
+    let utf16 = Array(code.utf16)
+    var parts: [String] = []
+
+    for i in 0..<root.childCount {
+      guard let child = root.child(at: i) else { continue }
+      let nodeType = child.nodeType ?? ""
+
+      switch nodeType {
+      case "import_declaration":
+        // Keep imports in full
+        parts.append(astNodeText(child, utf16: utf16))
+
+      case "class_declaration":
+        // struct/class/enum/actor/extension: keep declaration line + properties + func signatures
+        parts.append(astGistType(child, utf16: utf16))
+
+      case "protocol_declaration":
+        parts.append(astGistType(child, utf16: utf16))
+
+      case "function_declaration":
+        // Top-level function: keep signature only
+        parts.append(astGistFunction(child, utf16: utf16))
+
+      case "property_declaration":
+        parts.append(astNodeText(child, utf16: utf16))
+
+      case "typealias_declaration":
+        parts.append(astNodeText(child, utf16: utf16))
+
+      default:
+        // Skip other top-level nodes (comments, etc.)
+        break
+      }
+    }
+
+    return parts.isEmpty ? nil : parts.joined(separator: "\n")
+  }
+
+  /// Extract gist of a type declaration: header + properties + func signatures.
+  private func astGistType(_ node: Node, utf16: [UInt16]) -> String {
+    var parts: [String] = []
+
+    // Find the class_body / protocol_body child
+    var headerEnd: Int?
+    var bodyNode: Node?
+
+    for i in 0..<node.childCount {
+      guard let child = node.child(at: i) else { continue }
+      let ct = child.nodeType ?? ""
+      if ct == "class_body" || ct == "protocol_body" || ct == "enum_class_body" {
+        bodyNode = child
+        // Header is everything before the body's opening brace
+        headerEnd = Int(child.byteRange.lowerBound) / 2
+        break
+      }
+    }
+
+    // Emit the declaration header (up to opening brace)
+    if let end = headerEnd {
+      let start = Int(node.byteRange.lowerBound) / 2
+      let headerUtf16 = Array(utf16[start..<min(end, utf16.count)])
+      let header = String(utf16CodeUnits: headerUtf16, count: headerUtf16.count)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      parts.append(header + " {")
+    } else {
+      // No body found — emit entire node
+      parts.append(astNodeText(node, utf16: utf16))
+      return parts.joined(separator: "\n")
+    }
+
+    // Walk body children
+    if let body = bodyNode {
+      for i in 0..<body.childCount {
+        guard let child = body.child(at: i) else { continue }
+        let ct = child.nodeType ?? ""
+        switch ct {
+        case "property_declaration":
+          parts.append("  " + astNodeText(child, utf16: utf16).trimmingCharacters(in: .whitespaces))
+        case "function_declaration":
+          parts.append("  " + astGistFunction(child, utf16: utf16).trimmingCharacters(in: .whitespaces))
+        case "class_declaration", "protocol_declaration":
+          // Nested type: recurse
+          parts.append("  " + astGistType(child, utf16: utf16))
+        case "enum_entry":
+          parts.append("  " + astNodeText(child, utf16: utf16).trimmingCharacters(in: .whitespaces))
+        default:
+          break
+        }
+      }
+    }
+
+    parts.append("}")
+    return parts.joined(separator: "\n")
+  }
+
+  /// Extract gist of a function: signature only, body replaced with "// ...".
+  private func astGistFunction(_ node: Node, utf16: [UInt16]) -> String {
+    // Find the function_body child
+    for i in 0..<node.childCount {
+      guard let child = node.child(at: i) else { continue }
+      if child.nodeType == "function_body" || child.nodeType == "statements" {
+        // Emit everything before the body
+        let start = Int(node.byteRange.lowerBound) / 2
+        let bodyStart = Int(child.byteRange.lowerBound) / 2
+        let sigUtf16 = Array(utf16[start..<min(bodyStart, utf16.count)])
+        let sig = String(utf16CodeUnits: sigUtf16, count: sigUtf16.count)
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        return sig + "{ // ... }"
+      }
+    }
+    // No body found (protocol requirement or abstract) — emit full text
+    return astNodeText(node, utf16: utf16)
+  }
+
+  /// Extract text of an AST node from UTF-16 source.
+  private func astNodeText(_ node: Node, utf16: [UInt16]) -> String {
+    let start = Int(node.byteRange.lowerBound) / 2
+    let end = Int(node.byteRange.upperBound) / 2
+    guard start >= 0, end <= utf16.count, start < end else { return "" }
+    return String(utf16CodeUnits: Array(utf16[start..<end]), count: end - start)
+  }
+
+  // MARK: - Regex-Based Code Gist (~0.25x, fallback)
 
   /// Keep declarations and property lines, drop function bodies.
   /// Preserves: import, func/struct/class/enum/actor/protocol signatures,

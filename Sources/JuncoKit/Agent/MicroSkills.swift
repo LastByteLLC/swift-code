@@ -120,16 +120,8 @@ public struct SkillLoader: Sendable {
           """,
         tools: nil, maxSteps: nil, fileRoles: ["view"]
       ),
-      MicroSkill(
-        name: "swift-networking",
-        domain: "swift", taskTypes: ["add", "fix"],
-        hint: """
-          URLSession: let (data, _) = try await URLSession.shared.data(from: url). \
-          JSON: try JSONDecoder().decode(T.self, from: data). \
-          Do NOT use withCheckedThrowingContinuation — use async/await directly.
-          """,
-        tools: nil, maxSteps: nil, fileRoles: ["service"]
-      ),
+      // API-specific skills (swift-networking, avfoundation-audio) removed —
+      // API signatures are now discovered at runtime via SwiftInterfaceIndex.
       MicroSkill(
         name: "swift-async",
         domain: "swift", taskTypes: ["add", "fix"],

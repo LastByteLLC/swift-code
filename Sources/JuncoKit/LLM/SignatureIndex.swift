@@ -108,8 +108,19 @@ public struct SignatureIndex: Sendable {
 // MARK: - Built-in Signatures
 
 extension SignatureIndex {
+  // Static fallback table — Tier 3 in the TieredAPISurfaceProvider.
+  //
+  // ONLY contains entries that:
+  //   1. Cannot be discovered from .swiftinterface files at runtime
+  //   2. Have been stable in Swift/Apple SDKs for 3+ years
+  //
+  // Foundation, SwiftUI, and other SDK signatures are discovered at runtime
+  // via SwiftInterfaceIndex. Do NOT add SDK types here — add them to the
+  // runtime discovery path instead.
   static let defaultSignatures: [APISignature] = [
-    // MARK: URLSession / Networking
+
+    // MARK: - Stable Foundation patterns (since Swift 5.5 / iOS 15, 2021)
+    // These are in swiftinterface but kept as fallback for when SDK isn't available.
     APISignature(
       typeName: "URLSession",
       member: "data(from:)",
@@ -117,33 +128,11 @@ extension SignatureIndex {
       commonMistakes: ["asyncData", "fetchData", "getData", "download"]
     ),
     APISignature(
-      typeName: "URLSession",
-      member: "data(for:)",
-      signature: "URLSession.shared.data(for: URLRequest) async throws -> (Data, URLResponse)",
-      commonMistakes: ["send", "execute", "perform"]
-    ),
-    APISignature(
-      typeName: "URLSession",
-      member: "upload(for:from:)",
-      signature: "URLSession.shared.upload(for: URLRequest, from: Data) async throws -> (Data, URLResponse)",
-      commonMistakes: ["uploadData", "post"]
-    ),
-
-    // MARK: JSONDecoder / JSONEncoder
-    APISignature(
       typeName: "JSONDecoder",
       member: "decode(_:from:)",
       signature: "JSONDecoder().decode(T.self, from: Data) throws -> T",
       commonMistakes: ["decodeJSON", "parse", "fromJSON"]
     ),
-    APISignature(
-      typeName: "JSONEncoder",
-      member: "encode(_:)",
-      signature: "JSONEncoder().encode(value) throws -> Data",
-      commonMistakes: ["toJSON", "encodeJSON", "serialize"]
-    ),
-
-    // MARK: URL / URLComponents
     APISignature(
       typeName: "URL",
       member: "init(string:)",
@@ -151,88 +140,38 @@ extension SignatureIndex {
       commonMistakes: ["fromString", "parse", "create"]
     ),
     APISignature(
-      typeName: "URLComponents",
-      member: "queryItems",
-      signature: "URLComponents.queryItems: [URLQueryItem]?  // URLQueryItem(name:value:)",
-      commonMistakes: ["parameters", "params", "query"]
-    ),
-
-    // MARK: FileManager
-    APISignature(
       typeName: "FileManager",
       member: "contentsOfDirectory(atPath:)",
       signature: "FileManager.default.contentsOfDirectory(atPath: String) throws -> [String]",
       commonMistakes: ["listFiles", "readDirectory", "ls"]
     ),
+
+    // MARK: - ObjC-bridged methods (NOT in .swiftinterface, stable since iOS 4+)
     APISignature(
-      typeName: "FileManager",
-      member: "contents(atPath:)",
-      signature: "FileManager.default.contents(atPath: String) -> Data?",
-      commonMistakes: ["readFile", "read", "fileContents"]
+      typeName: "AVPlayer",
+      member: "play()",
+      signature: "player.play()  // player.pause() to stop",
+      commonMistakes: ["start", "resume", "begin", "playAudio"]
     ),
     APISignature(
-      typeName: "FileManager",
-      member: "createDirectory(atPath:withIntermediateDirectories:attributes:)",
-      signature: "FileManager.default.createDirectory(atPath: String, withIntermediateDirectories: Bool, attributes: [FileAttributeKey: Any]?) throws",
-      commonMistakes: ["mkdir", "makeDirectory", "createDir"]
+      typeName: "AVAudioSession",
+      member: "setCategory(_:)",
+      signature: "try AVAudioSession.sharedInstance().setCategory(.playback)",
+      commonMistakes: ["setAudioCategory", "configureAudio", "audioSetup"]
+    ),
+    APISignature(
+      typeName: "Process",
+      member: "init()",
+      signature: "let p = Process(); p.executableURL = URL(fileURLWithPath: path); p.arguments = [...]; try p.run()",
+      commonMistakes: ["NSTask", "exec", "shell", "system"]
     ),
 
-    // MARK: String / Data
-    APISignature(
-      typeName: "String",
-      member: "data(using:)",
-      signature: "String.data(using: String.Encoding) -> Data?",
-      commonMistakes: ["toData", "encode", "utf8Data"]
-    ),
-    APISignature(
-      typeName: "Data",
-      member: "init(contentsOf:)",
-      signature: "Data(contentsOf: URL) throws",
-      commonMistakes: ["fromURL", "load", "read"]
-    ),
-
-    // MARK: SwiftUI
-    APISignature(
-      typeName: "NavigationStack",
-      member: "init(path:root:)",
-      signature: "NavigationStack(path: Binding<NavigationPath>) { root }",
-      commonMistakes: ["NavigationView", "navigationStack"]
-    ),
-    APISignature(
-      typeName: "View",
-      member: "task(_:)",
-      signature: ".task { async work }  // or .task(id: value) { async work }",
-      commonMistakes: ["onAppear", "onLoad", "asyncTask"]
-    ),
-
-    // MARK: Observable / SwiftData
+    // MARK: - Pattern guidance (not signatures — migration/deprecation knowledge)
     APISignature(
       typeName: "Observable",
       member: "@Observable",
       signature: "@Observable class MyModel { var property: Type }  // NO @Published with @Observable",
       commonMistakes: ["@Published", "ObservableObject", "StateObject"]
-    ),
-
-    // MARK: iTunes Search / Podcasts API
-    APISignature(
-      typeName: "iTunesSearchAPI",
-      member: "search",
-      signature: "GET https://itunes.apple.com/search?term={query}&media=podcast&limit={n} -> {resultCount: Int, results: [{trackName, artistName, feedUrl, artworkUrl600, ...}]}",
-      commonMistakes: ["podcastSearch", "applePodcasts", "searchPodcasts"]
-    ),
-    APISignature(
-      typeName: "iTunesSearchAPI",
-      member: "lookup",
-      signature: "GET https://itunes.apple.com/lookup?id={podcastId}&entity=podcastEpisode&limit={n} -> {resultCount: Int, results: [{trackName, releaseDate, episodeUrl, description, ...}]}",
-      commonMistakes: ["podcastLookup", "getEpisodes", "fetchPodcast"]
-    ),
-
-    // MARK: Process / shell
-    APISignature(
-      typeName: "Process",
-      member: "init()",
-      signature: "let p = Process(); p.executableURL = URL(fileURLWithPath: \"/usr/bin/...\"); p.arguments = [...]; try p.run(); p.waitUntilExit()",
-      commonMistakes: ["NSTask", "exec", "shell", "system"]
     ),
   ]
 }

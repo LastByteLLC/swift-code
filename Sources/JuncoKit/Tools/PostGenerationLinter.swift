@@ -14,6 +14,7 @@ public struct PostGenerationLinter: Sendable {
   public func lint(content: String, filePath: String) -> String {
     guard filePath.hasSuffix(".swift") else { return content }
     var result = content
+    result = fixObservableObjectToObservable(result)
     result = fixObservablePublished(result)
     result = fixStateObjectWithObservable(result)
     result = fixNavigationView(result)
@@ -21,10 +22,75 @@ public struct PostGenerationLinter: Sendable {
     result = fixCallbackChimera(result)
     result = fixMissingImports(result)
     result = fixXCTestToSwiftTesting(result)
+    result = fixCodableLetId(result)
     return result
   }
 
   // MARK: - Rules
+
+  /// Transform ObservableObject conformance to @Observable class.
+  /// The 3B model's pre-training strongly favors ObservableObject over @Observable.
+  /// This rule catches the fallback path's output and rewrites it correctly.
+  private func fixObservableObjectToObservable(_ content: String) -> String {
+    guard content.contains("ObservableObject") else { return content }
+    guard !content.contains("@Observable") else { return content }
+
+    var lines = content.components(separatedBy: "\n")
+    var i = 0
+
+    while i < lines.count {
+      let trimmed = lines[i].trimmingCharacters(in: .whitespaces)
+
+      // Match: [access] struct/class Name: ... ObservableObject ... {
+      guard trimmed.contains("ObservableObject"),
+            trimmed.contains("{") || (i + 1 < lines.count && lines[i + 1].contains("{")) else {
+        i += 1
+        continue
+      }
+
+      // Parse the declaration
+      let declPattern = #"^(\s*)((?:public|private|internal|open|fileprivate)\s+)?(struct|class)\s+(\w+)\s*:\s*(.+?)\s*\{(.*)$"#
+      guard let regex = try? NSRegularExpression(pattern: declPattern),
+            let match = regex.firstMatch(in: lines[i], range: NSRange(lines[i].startIndex..., in: lines[i])) else {
+        i += 1
+        continue
+      }
+
+      let indent = Range(match.range(at: 1), in: lines[i]).map { String(lines[i][$0]) } ?? ""
+      let access = Range(match.range(at: 2), in: lines[i]).map { String(lines[i][$0]).trimmingCharacters(in: .whitespaces) } ?? ""
+      let typeName = Range(match.range(at: 4), in: lines[i]).map { String(lines[i][$0]) } ?? ""
+      let conformancesStr = Range(match.range(at: 5), in: lines[i]).map { String(lines[i][$0]) } ?? ""
+      let afterBrace = Range(match.range(at: 6), in: lines[i]).map { String(lines[i][$0]) } ?? ""
+
+      // Remove ObservableObject from conformances
+      let conformances = conformancesStr.split(separator: ",")
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { $0 != "ObservableObject" }
+
+      // Rebuild declaration as @Observable class
+      let accessPrefix = access.isEmpty ? "" : "\(access) "
+      let confSuffix = conformances.isEmpty ? "" : ": \(conformances.joined(separator: ", "))"
+      let attrLine = "\(indent)@Observable"
+      let declLine = "\(indent)\(accessPrefix)class \(typeName)\(confSuffix) {\(afterBrace)"
+      lines[i] = "\(attrLine)\n\(declLine)"
+      i += 1
+    }
+
+    var result = lines.joined(separator: "\n")
+
+    // Remove @Published (tracked automatically by @Observable)
+    result = result.replacingOccurrences(of: "@Published ", with: "")
+
+    // Remove Combine import if only used for ObservableObject/@Published
+    if result.contains("import Combine") && !result.contains("AnyCancellable")
+        && !result.contains("Publisher") && !result.contains("Subscriber")
+        && !result.contains("CurrentValueSubject") && !result.contains("PassthroughSubject") {
+      result = result.replacingOccurrences(of: "import Combine\n", with: "")
+      result = result.replacingOccurrences(of: "import Combine", with: "")
+    }
+
+    return result
+  }
 
   /// @Observable + @Published are mutually exclusive.
   /// If both present, remove @Published (the @Observable version tracks automatically).
@@ -78,6 +144,54 @@ public struct PostGenerationLinter: Sendable {
     result = result.replacingOccurrences(
       of: #"Image\(systemName:\s*"([^"]+)",\s*style:\s*[^)]+\)"#,
       with: #"Image(systemName: "$1")"#,
+      options: .regularExpression
+    )
+    // .textColor(.x) → .foregroundStyle(.x)
+    result = result.replacingOccurrences(
+      of: #"\.textColor\(([^)]+)\)"#,
+      with: ".foregroundStyle($1)",
+      options: .regularExpression
+    )
+    // .foregroundColor(.x) → .foregroundStyle(.x) (deprecated in iOS 17+)
+    result = result.replacingOccurrences(
+      of: #"\.foregroundColor\(([^)]+)\)"#,
+      with: ".foregroundStyle($1)",
+      options: .regularExpression
+    )
+    // .backgroundColor(.x) → .background(.x)
+    result = result.replacingOccurrences(
+      of: #"\.backgroundColor\(([^)]+)\)"#,
+      with: ".background($1)",
+      options: .regularExpression
+    )
+    // .cornerRadius(N) → .clipShape(.rect(cornerRadius: N))
+    result = result.replacingOccurrences(
+      of: #"\.cornerRadius\(([^)]+)\)"#,
+      with: ".clipShape(.rect(cornerRadius: $1))",
+      options: .regularExpression
+    )
+    // .size(width: X, height: Y) → .frame(width: X, height: Y)
+    result = result.replacingOccurrences(
+      of: #"\.size\(width:\s*([^,]+),\s*height:\s*([^)]+)\)"#,
+      with: ".frame(width: $1, height: $2)",
+      options: .regularExpression
+    )
+    // .onTap { } → .onTapGesture { }
+    result = result.replacingOccurrences(
+      of: #"\.onTap\s*\{"#,
+      with: ".onTapGesture {",
+      options: .regularExpression
+    )
+    // .maxWidth(.infinity) → .frame(maxWidth: .infinity)
+    result = result.replacingOccurrences(
+      of: #"\.maxWidth\(([^)]+)\)"#,
+      with: ".frame(maxWidth: $1)",
+      options: .regularExpression
+    )
+    // .accessoryView { ... } → remove (doesn't exist)
+    result = result.replacingOccurrences(
+      of: #"\.accessoryView\s*\{[^}]*\}"#,
+      with: "",
       options: .regularExpression
     )
     return result
@@ -233,51 +347,30 @@ public struct PostGenerationLinter: Sendable {
 
     var missingImports: [String] = []
 
-    // SwiftUI types
-    let swiftUITypes = ["View", "@State", "@Binding", "@Environment", "NavigationStack",
-                        "TabView", "List", "Form", "TextField", "Toggle", "Picker",
-                        "Stepper", "Button", "Text", "Image", "VStack", "HStack",
-                        "ZStack", "ScrollView", "LazyVGrid", "LazyHGrid", "Color",
-                        "GeometryReader", "@Observable", "@Query", "ContentUnavailableView",
-                        "@ScaledMetric", "ProgressView", "Label", "Section",
-                        "AsyncImage", "Chart", "BarMark", "LineMark"]
-    if !content.contains("import SwiftUI") {
-      for t in swiftUITypes {
-        if content.contains(t) {
-          missingImports.append("import SwiftUI")
+    // Framework markers — minimal unambiguous identifiers per framework.
+    // API signatures are discovered at runtime via SwiftInterfaceIndex;
+    // these markers just detect which import statement is needed.
+    let frameworkMarkers: [(framework: String, markers: [String])] = [
+      ("SwiftUI", ["View", "@State", "@Binding", "@Environment", "NavigationStack", "Text", "VStack"]),
+      ("Foundation", ["URLSession", "JSONDecoder", "JSONEncoder", "FileManager", "URLComponents"]),
+      ("SwiftData", ["@Model", "ModelContainer", "@Query", "FetchDescriptor"]),
+      ("Testing", ["@Test", "#expect", "#require", "@Suite"]),
+      ("AVFoundation", ["AVPlayer", "AVAudioSession", "AVPlayerItem"]),
+      ("Observation", ["@Observable"]),
+      ("Combine", ["AnyCancellable", "Publisher", "CurrentValueSubject"]),
+    ]
+
+    for (framework, markers) in frameworkMarkers {
+      let importStmt = "import \(framework)"
+      guard !content.contains(importStmt) else { continue }
+      // SwiftUI implicitly imports Foundation and Observation
+      if framework == "Foundation" && content.contains("import SwiftUI") { continue }
+      if framework == "Observation" && content.contains("import SwiftUI") { continue }
+      for marker in markers {
+        if content.contains(marker) {
+          missingImports.append(importStmt)
           break
         }
-      }
-    }
-
-    // Foundation types
-    let foundationTypes = ["URL", "Data", "Date", "UUID", "JSONEncoder", "JSONDecoder",
-                           "URLSession", "URLRequest", "URLError", "FileManager",
-                           "ProcessInfo", "UserDefaults", "ISO8601DateFormatter",
-                           "RelativeDateTimeFormatter", "Timer", "Notification"]
-    if !content.contains("import Foundation") && !content.contains("import SwiftUI") {
-      for t in foundationTypes {
-        // Check for the type as a word boundary (not substring of another word)
-        let pattern = "\\b\(t)\\b"
-        if content.range(of: pattern, options: .regularExpression) != nil {
-          missingImports.append("import Foundation")
-          break
-        }
-      }
-    }
-
-    // SwiftData
-    if !content.contains("import SwiftData") {
-      if content.contains("@Model") || content.contains("ModelContainer") || content.contains("ModelContext")
-          || content.contains("@Query") || content.contains("FetchDescriptor") {
-        missingImports.append("import SwiftData")
-      }
-    }
-
-    // Testing
-    if !content.contains("import Testing") {
-      if content.contains("@Test") || content.contains("#expect") || content.contains("#require") || content.contains("@Suite") {
-        missingImports.append("import Testing")
       }
     }
 
@@ -300,6 +393,16 @@ public struct PostGenerationLinter: Sendable {
     var result = content
     result = result.replacingOccurrences(of: "import XCTest", with: "import Testing")
     return result
+  }
+
+  /// Fix `let id = UUID()` in Codable types — decoder can't overwrite a `let` with initial value.
+  /// Changes to `var id = UUID()` which allows the decoder to set the value from JSON.
+  private func fixCodableLetId(_ content: String) -> String {
+    guard content.contains("Codable"), content.contains("let id") else { return content }
+    return content.replacingOccurrences(
+      of: "let id = UUID()",
+      with: "var id = UUID()"
+    )
   }
 
   // MARK: - Plain Text Output Cleanup

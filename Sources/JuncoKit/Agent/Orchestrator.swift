@@ -33,6 +33,7 @@ public actor Orchestrator {
   private let webResearch: WebResearch
   private let candidateGenerator: CandidateGenerator
   private let signatureIndex: SignatureIndex
+  private let apiProvider: TieredAPISurfaceProvider
   private let workingDirectory: String
   public let domain: DomainConfig
   private let intentClassifier: IntentClassifier
@@ -90,6 +91,14 @@ public actor Orchestrator {
       temperature: Config.candidateTemperature
     )
     self.signatureIndex = SignatureIndex.builtIn()
+    let swiftInterfaceIdx = SwiftInterfaceIndex(
+      cacheDirectory: "\(workingDirectory)/\(Config.projectDirName)/api_cache"
+    )
+    self.apiProvider = TieredAPISurfaceProvider(
+      swiftInterfaceIndex: swiftInterfaceIdx,
+      lspClient: self.lspClient,
+      staticFallback: self.signatureIndex
+    )
     self.metrics = SessionMetrics()
   }
 
@@ -202,6 +211,13 @@ public actor Orchestrator {
       Task.detached(priority: .utility) { [embeddingIndex] in
         await embeddingIndex.buildIndex(from: entries)
       }
+
+      // Preload SDK API surfaces for frameworks used in the project
+      let detectedFrameworks = Set(projectIndex.filter { $0.kind == .import }.map(\.symbolName))
+      let provider = apiProvider
+      Task.detached(priority: .utility) {
+        await provider.preloadFrameworks(detectedFrameworks)
+      }
     }
 
     // Classify
@@ -264,6 +280,15 @@ public actor Orchestrator {
       debug("  [\(i + 1)] \(task.action.rawValue): \(task.target)")
     }
 
+    // Multi-file scaffolds: override complexity to prevent early termination
+    if tasks.count >= 4, intent.complexity == "simple" {
+      memory.intent = AgentIntent(
+        domain: intent.domain, taskType: intent.taskType,
+        complexity: "complex", mode: intent.mode, targets: intent.targets
+      )
+      debug("Complexity override: simple → complex (scaffold with \(tasks.count) tasks)")
+    }
+
     // Execute tasks directly (1 LLM call per task)
     var filesWereModified = false
     let totalTasks = tasks.count
@@ -288,8 +313,8 @@ public actor Orchestrator {
       }
       debug("TASK[\(index + 1)] → [\(observation.outcome.rawValue)] \(observation.tool): \(observation.keyFact)")
 
-      // Early termination on simple create success
-      if intent.complexity == "simple" && index == 0 && tasks.count > 1 {
+      // Early termination on simple create success (check memory.intent, not stale local)
+      if memory.intent?.complexity == "simple" && index == 0 && tasks.count > 1 {
         if observation.outcome == .ok && task.action == .create {
           debug("EARLY EXIT: simple create succeeded on task 1")
           break
@@ -353,7 +378,7 @@ public actor Orchestrator {
       }
 
       // Scope check: simple task with too many steps
-      if intent.complexity == "simple" && index >= 3 {
+      if memory.intent?.complexity == "simple" && index >= 3 {
         debug("GUARDRAIL: simple task exceeded 3 steps, stopping")
         break
       }
@@ -490,6 +515,14 @@ public actor Orchestrator {
 
     // Build-fix reflexion loop: attempt to fix build errors before reflecting
     await buildAndFix(memory: &memory)
+
+    // Persist type manifest to scratchpad for cross-turn coherence
+    if memory.touchedFiles.count > 1 {
+      let manifest = projectSnapshot.typeSignatureBlock(budget: 200)
+      if !manifest.isEmpty {
+        scratchpad.write(key: "generated_types", value: manifest)
+      }
+    }
 
     let reflection = reflect(memory: memory)
     debug("REFLECT → succeeded:\(reflection.succeeded) insight:\(reflection.insight)")
@@ -1193,7 +1226,7 @@ public actor Orchestrator {
     "explain": "explain", "describe": "explain", "what": "explain",
     "how": "explain", "why": "explain", "summarize": "explain",
     "fix": "fix", "debug": "fix", "repair": "fix",
-    "add": "add", "create": "add", "implement": "add", "write": "add",
+    "add": "add", "create": "add", "implement": "add", "write": "add", "build": "add",
     "refactor": "refactor", "clean": "refactor", "simplify": "refactor",
     "test": "test",
     "find": "explore", "search": "explore", "grep": "explore",
@@ -1456,17 +1489,39 @@ public actor Orchestrator {
     }
 
     do {
-      var content: String
+      var content: String = ""
 
-      // Route 1: Template (App entry points, Package.swift, entitlements, etc.)
-      if templateRenderer.shouldUseTemplate(filePath: target),
-         let rendered = try await templateRenderer.resolveTemplate(
-           filePath: target, prompt: task.specification, adapter: adapter) {
-        debug("Template route for \(target)")
-        content = rendered
+      // Route 1: Template (App entry points, Package.swift, services, viewmodels, views, etc.)
+      // On failure, retry template with stripped prompt before falling back to plain generation.
+      var usedTemplate = false
+      if templateRenderer.shouldUseTemplate(filePath: target) {
+        do {
+          if let rendered = try await templateRenderer.resolveTemplate(
+               filePath: target, prompt: task.specification, adapter: adapter,
+               snapshot: projectSnapshot) {
+            debug("Template route for \(target)")
+            content = rendered
+            usedTemplate = true
+          }
+        } catch {
+          debug("Template failed for \(target): \(error)")
+          // Retry with stripped prompt (avoids context overflow on retry)
+          do {
+            let strippedPrompt = "Create \(target). \(TokenBudget.truncate(memory.query, toTokens: 100))"
+            if let retried = try await templateRenderer.resolveTemplate(
+                 filePath: target, prompt: strippedPrompt, adapter: adapter,
+                 snapshot: projectSnapshot) {
+              debug("Template retry succeeded for \(target)")
+              content = retried
+              usedTemplate = true
+            }
+          } catch {
+            debug("Template retry also failed for \(target): \(error)")
+          }
+        }
       }
       // Route 2: Plain generation with two-phase overflow fallback
-      else {
+      if !usedTemplate {
         do {
           var system = Prompts.createSystem(domain: domain)
           if target.hasSuffix(".swift") {
@@ -1515,6 +1570,14 @@ public actor Orchestrator {
       metrics.filesModified += 1
       try files.write(path: target, content: content)
       lastDiffs.append(diffPreview.diffWrite(filePath: target, existingContent: nil, newContent: content))
+
+      // Update live index so subsequent steps see this file's types
+      let newEntries = TreeSitterExtractor().extract(from: content, file: target)
+      projectIndex = projectIndex.filter { $0.filePath != target } + newEntries
+      projectSnapshot = projectAnalyzer.updateSnapshot(
+        projectSnapshot, afterWriting: target, content: content,
+        extractor: TreeSitterExtractor()
+      )
 
       // Post-write verification
       let urls = Self.extractURLs(memory.query)
@@ -1570,6 +1633,14 @@ public actor Orchestrator {
       try files.write(path: target, content: newContent)
       let diff = diffPreview.diffWrite(filePath: target, existingContent: existing, newContent: newContent)
       lastDiffs.append(diff)
+
+      // Update live index so subsequent steps see edited types
+      let editEntries = TreeSitterExtractor().extract(from: newContent, file: target)
+      projectIndex = projectIndex.filter { $0.filePath != target } + editEntries
+      projectSnapshot = projectAnalyzer.updateSnapshot(
+        projectSnapshot, afterWriting: target, content: newContent,
+        extractor: TreeSitterExtractor()
+      )
 
       return StepObservation(tool: "edit", outcome: .ok, keyFact: "Edited \(target)")
     } catch {
@@ -1675,7 +1746,8 @@ public actor Orchestrator {
         let intentPrompt = "\(base)\nUser request: \(TokenBudget.truncate(memory.query, toTokens: 200))"
         memory.trackCall(estimatedTokens: 600)
         if let rendered = try await templateRenderer.resolveTemplate(
-          filePath: createTarget, prompt: intentPrompt, adapter: adapter
+          filePath: createTarget, prompt: intentPrompt, adapter: adapter,
+          snapshot: projectSnapshot
         ) {
           return .create(path: createTarget, content: rendered)
         }
@@ -1857,7 +1929,7 @@ public actor Orchestrator {
       // None compiled — try enriching with signature hints
       debug("CANDIDATE: best has \(result.errorCount) errors, trying signature-enriched fix")
       let (_, hints) = await candidateGenerator.evaluateAndSuggestFix(
-        code: value.content, filePath: filePath, signatureIndex: signatureIndex
+        code: value.content, filePath: filePath, apiProvider: apiProvider
       )
 
       if !hints.isEmpty {
@@ -2118,7 +2190,8 @@ public actor Orchestrator {
       do {
         try files.edit(path: path, find: find, replace: replace)
       } catch is FileToolError {
-        try files.edit(path: path, find: find, replace: replace, fuzzy: true)
+        // Cascade: fuzzy → structural (AST) → patch
+        try files.edit(path: path, find: find, replace: replace, fuzzy: true, structural: true)
       }
 
       // Per-tool verification: confirm the replacement text is present

@@ -1,4 +1,4 @@
-// SignatureIndexTests.swift — Tests for API signature lookup
+// SignatureIndexTests.swift — Tests for API signature lookup (static fallback table)
 
 import Foundation
 import Testing
@@ -12,26 +12,16 @@ struct SignatureIndexTests {
   @Test("builtIn index has signatures")
   func builtInNotEmpty() {
     let index = SignatureIndex.builtIn()
-    #expect(index.count > 10)
+    #expect(index.count >= 4, "Should have at least the core fallback entries")
   }
 
-  // MARK: - Compiler Error Pattern Matching
+  // MARK: - Stable Foundation Patterns (kept in static table)
 
   @Test("Looks up 'no member asyncData' on URLSession")
   func lookupAsyncData() {
     let index = SignatureIndex.builtIn()
     let hint = index.lookup(
       compilerError: "error: value of type 'URLSession' has no member 'asyncData'"
-    )
-    #expect(hint != nil)
-    #expect(hint!.contains("URLSession.shared.data(from:"))
-  }
-
-  @Test("Looks up 'no member fetchData' on URLSession")
-  func lookupFetchData() {
-    let index = SignatureIndex.builtIn()
-    let hint = index.lookup(
-      compilerError: "error: value of type 'URLSession' has no member 'fetchData'"
     )
     #expect(hint != nil)
     #expect(hint!.contains("data(from:"))
@@ -47,15 +37,6 @@ struct SignatureIndexTests {
     #expect(hint!.contains("decode"))
   }
 
-  @Test("Returns nil for unknown errors")
-  func lookupUnknown() {
-    let index = SignatureIndex.builtIn()
-    let hint = index.lookup(
-      compilerError: "error: cannot find 'fooBarBaz' in scope"
-    )
-    #expect(hint == nil)
-  }
-
   @Test("Looks up 'no member fromString' on URL")
   func lookupURLFromString() {
     let index = SignatureIndex.builtIn()
@@ -66,20 +47,37 @@ struct SignatureIndexTests {
     #expect(hint!.contains("URL(string:"))
   }
 
-  // MARK: - Incorrect Argument Label Pattern
-
-  @Test("Matches incorrect argument label pattern")
-  func incorrectArgumentLabel() {
+  @Test("Returns nil for unknown errors")
+  func lookupUnknown() {
     let index = SignatureIndex.builtIn()
     let hint = index.lookup(
-      compilerError: "error: incorrect argument label in call (have 'url:', expected 'from:')"
+      compilerError: "error: cannot find 'fooBarBaz' in scope"
     )
-    // Should find URLSession.shared.data(from:) since it has "from:"
-    if let hint {
-      #expect(hint.contains("from:"))
-    }
-    // This may or may not match depending on which signature has "from:" — the test
-    // validates the pattern matching logic runs without crashing
+    #expect(hint == nil)
+  }
+
+  // MARK: - ObjC-Bridged Methods (not in swiftinterface)
+
+  @Test("AVPlayer.play lookup works")
+  func lookupAVPlayerPlay() {
+    let index = SignatureIndex.builtIn()
+    let hint = index.lookup(
+      compilerError: "error: value of type 'AVPlayer' has no member 'start'"
+    )
+    #expect(hint != nil)
+    #expect(hint!.contains("play()"))
+  }
+
+  // MARK: - Pattern Guidance
+
+  @Test("@Observable pattern is indexed")
+  func observablePattern() {
+    let index = SignatureIndex.builtIn()
+    let hint = index.lookup(
+      compilerError: "error: value of type 'Observable' has no member 'ObservableObject'"
+    )
+    #expect(hint != nil)
+    #expect(hint!.contains("@Observable"))
   }
 
   // MARK: - Custom Index
@@ -116,38 +114,28 @@ struct SignatureIndexTests {
     #expect(decoded.commonMistakes.count == 2)
   }
 
-  // MARK: - Podcast API Signatures
-
-  @Test("iTunes Search API signature is indexed")
-  func itunesSearchSignature() {
-    let index = SignatureIndex.builtIn()
-    let hint = index.lookup(
-      compilerError: "error: value of type 'iTunesSearchAPI' has no member 'podcastSearch'"
-    )
-    #expect(hint != nil)
-    #expect(hint!.contains("itunes.apple.com/search"))
-  }
-
-  @Test("iTunes Lookup API signature is indexed")
-  func itunesLookupSignature() {
-    let index = SignatureIndex.builtIn()
-    let hint = index.lookup(
-      compilerError: "error: value of type 'iTunesSearchAPI' has no member 'getEpisodes'"
-    )
-    #expect(hint != nil)
-    #expect(hint!.contains("itunes.apple.com/lookup"))
-  }
-
-  // MARK: - No-member fallback (without type context)
+  // MARK: - Bare member fallback
 
   @Test("Bare 'no member' matches via commonMistakes scan")
   func bareMemberMatch() {
     let index = SignatureIndex.builtIn()
-    // Error without explicit type name
     let hint = index.lookup(
       compilerError: "error: has no member 'asyncData'"
     )
     #expect(hint != nil)
     #expect(hint!.contains("URLSession"))
+  }
+
+  // MARK: - Argument label pattern
+
+  @Test("Matches incorrect argument label pattern")
+  func incorrectArgumentLabel() {
+    let index = SignatureIndex.builtIn()
+    let hint = index.lookup(
+      compilerError: "error: incorrect argument label in call (have 'url:', expected 'from:')"
+    )
+    if let hint {
+      #expect(hint.contains("from:"))
+    }
   }
 }

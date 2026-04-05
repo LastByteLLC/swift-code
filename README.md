@@ -1,7 +1,7 @@
 # Junco
 
 <p align="center">
-  <img src="junco.png" width="128" height="128" alt="Junco Icon" />
+  <img src="junco.svg" width="128" height="128" alt="Junco Icon" />
 </p>
 
 <h1 align="center">Junco</h1>

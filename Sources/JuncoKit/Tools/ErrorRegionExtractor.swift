@@ -4,6 +4,8 @@
 // to the model for fixing, instead of the entire file.
 
 import Foundation
+import SwiftTreeSitter
+import TreeSitterSwiftGrammar
 
 /// A region of code extracted from a file, with its line range.
 public struct CodeRegion: Sendable {
@@ -68,7 +70,69 @@ public struct ErrorRegionExtractor: Sendable {
     return errors
   }
 
-  // MARK: - Region Extraction
+  // MARK: - AST-Based Region Extraction
+
+  /// Extract the enclosing declaration around an error line using TreeSitter.
+  /// Finds the deepest named declaration node containing the error line.
+  /// Falls back to regex-based extraction if parsing fails.
+  public func extractAST(content: String, errorLine: Int) -> CodeRegion? {
+    let language = Language(language: tree_sitter_swift())
+    let parser = Parser()
+    do { try parser.setLanguage(language) } catch { return nil }
+    guard let tree = parser.parse(content) else { return nil }
+    guard let root = tree.rootNode else { return nil }
+
+    let targetRow = UInt32(errorLine - 1) // tree-sitter uses 0-indexed rows
+    // Prefer function/type-level declarations over properties for error context.
+    // A property error inside a function body is more useful with the full function.
+    let enclosingTypes: Set<String> = [
+      "function_declaration", "class_declaration", "protocol_declaration",
+    ]
+    var bestNode: Node?
+    var bestSize: UInt32 = .max
+
+    func walk(_ node: Node) {
+      let startRow = node.pointRange.lowerBound.row
+      let endRow = node.pointRange.upperBound.row
+      guard targetRow >= startRow, targetRow <= endRow else { return }
+
+      let nodeType = node.nodeType ?? ""
+
+      if enclosingTypes.contains(nodeType) {
+        let size = endRow - startRow
+        if size < bestSize {
+          bestNode = node
+          bestSize = size
+        }
+      }
+
+      for i in 0..<node.childCount {
+        if let child = node.child(at: i) { walk(child) }
+      }
+    }
+
+    walk(root)
+
+    guard let node = bestNode else { return nil }
+    let lines = content.components(separatedBy: "\n")
+    let startLine = Int(node.pointRange.lowerBound.row)
+    var endLine = Int(node.pointRange.upperBound.row)
+
+    // Safety: cap at 30 lines
+    if endLine - startLine > 30 {
+      let target = errorLine - 1
+      let narrowStart = max(0, target - 5)
+      let narrowEnd = min(lines.count - 1, target + 5)
+      let regionLines = Array(lines[narrowStart...narrowEnd])
+      return CodeRegion(text: regionLines.joined(separator: "\n"), startLine: narrowStart, endLine: narrowEnd)
+    }
+
+    endLine = min(endLine, lines.count - 1)
+    let regionLines = Array(lines[startLine...endLine])
+    return CodeRegion(text: regionLines.joined(separator: "\n"), startLine: startLine, endLine: endLine)
+  }
+
+  // MARK: - Regex-Based Region Extraction (fallback)
 
   /// Extract the enclosing function/type around an error line.
   /// Walks backward to find the containing `func`, `struct`, `class`, `actor`, or `enum`,
@@ -120,18 +184,23 @@ public struct ErrorRegionExtractor: Sendable {
   }
 
   /// Extract from an error message string (parses line number from the error).
+  /// Tries AST-based extraction first, falls back to regex.
   public func extract(content: String, errorMessage: String) -> CodeRegion? {
     let errors = parseErrors(errorMessage)
-    guard let firstError = errors.first else {
-      // Try to extract a line number from generic error format
+    let errorLine: Int
+    if let firstError = errors.first {
+      errorLine = firstError.line
+    } else {
       let pattern = #":(\d+):"#
       guard let match = errorMessage.range(of: pattern, options: .regularExpression),
             let line = Int(errorMessage[match].dropFirst().dropLast()) else {
         return nil
       }
-      return extract(content: content, errorLine: line)
+      errorLine = line
     }
-    return extract(content: content, errorLine: firstError.line)
+    // AST-first, regex fallback
+    return extractAST(content: content, errorLine: errorLine)
+        ?? extract(content: content, errorLine: errorLine)
   }
 
   // MARK: - Splicing

@@ -82,10 +82,23 @@ public struct WorkingMemory: Sendable {
       }
     }
 
-    // Last 2 observations only
-    let recentObs = observations.suffix(2)
-    for obs in recentObs {
-      parts.append("[\(obs.tool)] \(obs.outcome.rawValue): \(obs.keyFact)")
+    // Adaptive observation detail: scale down at later steps to save tokens
+    if currentStepIndex >= 4 {
+      // Step 5+: minimal — just a counter
+      let okCount = observations.filter { $0.outcome == .ok }.count
+      let errCount = observations.filter { $0.outcome == .error }.count
+      parts.append("Steps done: \(okCount) ok\(errCount > 0 ? ", \(errCount) error" : "")")
+    } else if currentStepIndex >= 2 {
+      // Step 3-4: last observation only, compact
+      if let last = observations.last {
+        parts.append("[\(last.tool)] \(last.outcome.rawValue): \(last.keyFact)")
+      }
+    } else {
+      // Step 1-2: full detail (last 2 observations)
+      let recentObs = observations.suffix(2)
+      for obs in recentObs {
+        parts.append("[\(obs.tool)] \(obs.outcome.rawValue): \(obs.keyFact)")
+      }
     }
 
     if !errors.isEmpty {

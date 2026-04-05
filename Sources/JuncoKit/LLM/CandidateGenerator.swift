@@ -140,8 +140,26 @@ public struct CandidateGenerator: Sendable {
     }
   }
 
-  /// Evaluate code and, if it fails, enrich the error with correct API signatures
-  /// from a SignatureIndex before retrying.
+  /// Evaluate code and, if it fails, enrich the error with correct API signatures.
+  /// Uses the APISurfaceProvider for runtime discovery (swiftinterface → LSP → static fallback).
+  public func evaluateAndSuggestFix(
+    code: String,
+    filePath: String,
+    apiProvider: any APISurfaceProvider
+  ) async -> (result: CandidateResult, fixHints: [String]) {
+    let result = await evaluate(code: code, filePath: filePath)
+    guard !result.compiled else { return (result, []) }
+
+    var hints: [String] = []
+    for errorLine in result.errors {
+      if let hint = await apiProvider.lookupFix(compilerError: errorLine) {
+        hints.append(hint)
+      }
+    }
+    return (result, hints)
+  }
+
+  /// Legacy overload for backward compatibility with SignatureIndex.
   public func evaluateAndSuggestFix(
     code: String,
     filePath: String,
@@ -150,7 +168,6 @@ public struct CandidateGenerator: Sendable {
     let result = await evaluate(code: code, filePath: filePath)
     guard !result.compiled else { return (result, []) }
 
-    // Parse compiler errors and look up correct signatures
     var hints: [String] = []
     for errorLine in result.errors {
       if let hint = signatureIndex.lookup(compilerError: errorLine) {

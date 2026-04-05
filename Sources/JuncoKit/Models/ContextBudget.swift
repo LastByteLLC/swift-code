@@ -81,4 +81,18 @@ public struct ContextBudget: Sendable {
       )
     }
   }
+
+  /// Step-aware execute budget: at step 4+, reduce memory/retrieval and give tokens to fileContent.
+  /// The model has established context by step 4 — needs more room for code generation.
+  public static func forExecute(windowSize: Int, stepIndex: Int) -> ContextBudget {
+    var budget = forWindow(windowSize, stage: .execute)
+    if stepIndex >= 3 {
+      let savedMemory = budget.memory - 100
+      let savedRetrieval = budget.retrieval - 150
+      budget.memory = 100
+      budget.retrieval = 150
+      budget.fileContent += savedMemory + savedRetrieval
+    }
+    return budget
+  }
 }

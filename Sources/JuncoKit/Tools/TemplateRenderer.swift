@@ -82,9 +82,9 @@ public struct XcconfigIntent: Codable, Sendable {
 
 @Generable
 public struct AppEntryPointIntent: Codable, Sendable {
-  @Guide(description: "App struct name like PodcastApp") public var appName: String
-  @Guide(description: "Root view type name like ContentView or PodcastListView") public var rootView: String
-  @Guide(description: "State properties like @State private var viewModel = PodcastViewModel(), empty if none") public var stateProperties: [String]
+  @Guide(description: "App struct name like MyApp") public var appName: String
+  @Guide(description: "Root view type name like ContentView") public var rootView: String
+  @Guide(description: "State properties or empty") public var stateProperties: [String]
 }
 
 // MARK: - Swift Test File
@@ -97,51 +97,75 @@ public struct SwiftTestIntent: Codable, Sendable {
   @Guide(description: "Brief description of what each test checks") public var testDescriptions: [String]
 }
 
-// MARK: - Model File
+// MARK: - Model File (flat schema — no nested arrays)
 
 @Generable
-public struct ModelTypeIntent: Codable, Sendable {
-  @Guide(description: "Type name like Podcast or Episode") public var typeName: String
-  @Guide(description: "Properties as type declarations like let id: Int or var name: String") public var properties: [String]
-  @Guide(description: "Protocol conformances like Identifiable, Codable, Hashable") public var conformances: [String]
+public struct ModelFlatIntent: Codable, Sendable {
+  @Guide(description: "Type name like Item") public var typeName: String
+  @Guide(description: "First property like let title: String") public var property1: String
+  @Guide(description: "Second property like let subtitle: String") public var property2: String
+  @Guide(description: "Third property like let imageURL: String?") public var property3: String
+  @Guide(description: "Fourth property or blank") public var property4: String
+  @Guide(description: "Conformances like Codable, Identifiable") public var conformances: String
+}
+
+// MARK: - Service File (flat schema — no nested arrays)
+
+@Generable
+public struct ServiceFlatIntent: Codable, Sendable {
+  @Guide(description: "Actor name like DataService") public var actorName: String
+  @Guide(description: "Method name like fetchItems") public var methodName: String
+  @Guide(description: "Parameters like query: String") public var methodParams: String
+  @Guide(description: "Return type like [Item]") public var returnType: String
+  @Guide(description: "API base URL") public var baseURL: String
+  @Guide(description: "Query parameter names comma-separated") public var queryParamNames: String
+  @Guide(description: "Fixed query values like type=json, or blank") public var fixedParams: String
+}
+
+// MARK: - ViewModel File (flat schema — no nested arrays)
+
+@Generable
+public struct ViewModelFlatIntent: Codable, Sendable {
+  @Guide(description: "Class name like ItemViewModel") public var className: String
+  @Guide(description: "Main collection property like var items: [Item] = []") public var property1: String
+  @Guide(description: "Second state property or blank") public var property2: String
+  @Guide(description: "Third state property or blank") public var property3: String
+  @Guide(description: "Service type name") public var serviceName: String
+  @Guide(description: "Async method name like load or search") public var methodName: String
+  @Guide(description: "Service call like fetchItems(query: searchText)") public var serviceCall: String
+  @Guide(description: "Property to assign result to") public var targetProperty: String
+}
+
+// MARK: - ListView File (flat schema)
+
+@Generable
+public struct ListViewFlatIntent: Codable, Sendable {
+  @Guide(description: "View struct name like ItemListView") public var viewName: String
+  @Guide(description: "ViewModel type name") public var viewModelType: String
+  @Guide(description: "List data property name") public var listProperty: String
+  @Guide(description: "Item type name") public var itemType: String
+  @Guide(description: "Primary text property name like title") public var titleProperty: String
+  @Guide(description: "Secondary text property or blank") public var subtitleProperty: String
+  @Guide(description: "Search binding property or blank") public var searchProperty: String
+  @Guide(description: "Async load method name") public var loadMethod: String
+  @Guide(description: "Navigation bar title") public var navigationTitle: String
+}
+
+// MARK: - Reduced Intents (snapshot-driven, ≤4 fields for reliable 3B output)
+
+@Generable
+public struct ViewModelReducedIntent: Codable, Sendable {
+  @Guide(description: "Class name like ItemViewModel") public var className: String
+  @Guide(description: "Main collection property") public var property1: String
+  @Guide(description: "Second state property or blank") public var property2: String
+  @Guide(description: "Async method name like load") public var methodName: String
 }
 
 @Generable
-public struct ModelsFileIntent: Codable, Sendable {
-  @Guide(description: "All model types to create in this file") public var models: [ModelTypeIntent]
-}
-
-// MARK: - Service File
-
-@Generable
-public struct ServiceMethodIntent: Codable, Sendable {
-  @Guide(description: "Method signature like func fetchTopPodcasts() async throws -> [Podcast]") public var signature: String
-  @Guide(description: "The URL string this method fetches from, empty if not a network method") public var url: String
-  @Guide(description: "The return type to decode like [Podcast] or User") public var decodedType: String
-}
-
-@Generable
-public struct ServiceIntent: Codable, Sendable {
-  @Guide(description: "Actor name like PodcastService or UserService") public var actorName: String
-  @Guide(description: "Methods this service provides") public var methods: [ServiceMethodIntent]
-}
-
-// MARK: - ViewModel File
-
-@Generable
-public struct ViewModelMethodIntent: Codable, Sendable {
-  @Guide(description: "Method name like loadTopPodcasts or loadEpisodes") public var name: String
-  @Guide(description: "Parameters like podcastID: Int, empty if none") public var parameters: String
-  @Guide(description: "The service method to call like service.fetchTopPodcasts()") public var serviceCall: String
-  @Guide(description: "The state property to assign the result to like podcasts") public var targetProperty: String
-}
-
-@Generable
-public struct ViewModelIntent: Codable, Sendable {
-  @Guide(description: "Class name like PodcastViewModel") public var className: String
-  @Guide(description: "State properties like var podcasts: [Podcast] = []") public var stateProperties: [String]
-  @Guide(description: "Private properties like private let service = PodcastService()") public var privateProperties: [String]
-  @Guide(description: "Async loading methods") public var methods: [ViewModelMethodIntent]
+public struct ListViewReducedIntent: Codable, Sendable {
+  @Guide(description: "View name like ItemListView") public var viewName: String
+  @Guide(description: "Navigation bar title") public var navigationTitle: String
+  @Guide(description: "Item type name") public var itemType: String
 }
 
 // MARK: - Code Fragment (for targeted retry)
@@ -186,6 +210,8 @@ public struct TemplateRenderer: Sendable {
       return "Extract the service actor name and its methods with signatures, URLs, and return types."
     } else if name.contains("viewmodel") && name.hasSuffix(".swift") {
       return "Extract the ViewModel class name, state properties, private dependencies, and async loading methods."
+    } else if name.contains("view") && name.hasSuffix(".swift") && !name.contains("preview") {
+      return "Extract the view name, ViewModel type, list data property, item type, title/subtitle properties, search property, load method, and navigation title."
     }
     return nil
   }
@@ -195,7 +221,8 @@ public struct TemplateRenderer: Sendable {
   public func resolveTemplate(
     filePath: String,
     prompt: String,
-    adapter: any LLMAdapter
+    adapter: any LLMAdapter,
+    snapshot: ProjectSnapshot = .empty
   ) async throws -> String? {
     let name = (filePath as NSString).lastPathComponent.lowercased()
     guard let system = templateSystemPrompt(for: filePath) else { return nil }
@@ -219,18 +246,111 @@ public struct TemplateRenderer: Sendable {
       let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: XcconfigIntent.self, options: nil)
       return renderXcconfig(intent)
     } else if name.hasSuffix("app.swift") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: AppEntryPointIntent.self, options: nil)
+      var intent = try await adapter.generateStructured(prompt: prompt, system: system, as: AppEntryPointIntent.self, options: nil)
+      // Override rootView from snapshot if a View type exists (model often defaults to "ContentView")
+      if let firstView = snapshot.views.first, intent.rootView == "ContentView" || intent.rootView.isEmpty {
+        intent.rootView = firstView.name
+      }
       return renderAppEntryPoint(intent)
-    } else if name.contains("model") && name.hasSuffix(".swift") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ModelsFileIntent.self, options: nil)
-      return renderModels(intent)
+    } else if name.contains("model") && name.hasSuffix(".swift") && !name.contains("viewmodel") {
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ModelFlatIntent.self, options: nil)
+      return renderModelFlat(intent)
     } else if name.contains("service") && name.hasSuffix(".swift") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ServiceIntent.self, options: nil)
-      return renderService(intent)
+      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ServiceFlatIntent.self, options: nil)
+      let rendered = renderServiceFlat(intent)
+      if let error = validateTemplateOutput(rendered, filePath: filePath) {
+        throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
+      }
+      return rendered
     } else if name.contains("viewmodel") && name.hasSuffix(".swift") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ViewModelIntent.self, options: nil)
-      return renderViewModel(intent)
+      let deriver = SnapshotDeriver()
+      // Snapshot-driven reduced path (4 fields) when service data is available
+      if !snapshot.services.isEmpty {
+        let reduced = try await adapter.generateStructured(
+          prompt: prompt, system: system, as: ViewModelReducedIntent.self, options: nil
+        )
+        if let full = deriver.deriveViewModel(reduced: reduced, snapshot: snapshot) {
+          let rendered = renderViewModelFlat(full)
+          if let error = validateTemplateOutput(rendered, filePath: filePath) {
+            throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
+          }
+          return rendered
+        }
+      }
+      // Fallback: full 8-field intent
+      let intent = try await adapter.generateStructured(
+        prompt: prompt, system: system, as: ViewModelFlatIntent.self, options: nil
+      )
+      let rendered = renderViewModelFlat(intent)
+      if let error = validateTemplateOutput(rendered, filePath: filePath) {
+        throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
+      }
+      return rendered
+    } else if name.contains("view") && name.hasSuffix(".swift") && !name.contains("preview") {
+      let deriver = SnapshotDeriver()
+      let hasVM = (snapshot.services + snapshot.models).contains(where: { $0.name.contains("ViewModel") })
+      let hasModel = snapshot.models.contains(where: { !$0.name.contains("ViewModel") })
+      // Snapshot-driven reduced path (3 fields) when ViewModel + Model data available
+      if hasVM && hasModel {
+        let reduced = try await adapter.generateStructured(
+          prompt: prompt, system: system, as: ListViewReducedIntent.self, options: nil
+        )
+        if let full = deriver.deriveListView(reduced: reduced, snapshot: snapshot) {
+          let rendered = renderListView(full)
+          if let error = validateTemplateOutput(rendered, filePath: filePath) {
+            throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
+          }
+          return rendered
+        }
+      }
+      // Fallback: full 9-field intent
+      let intent = try await adapter.generateStructured(
+        prompt: prompt, system: system, as: ListViewFlatIntent.self, options: nil
+      )
+      let rendered = renderListView(intent)
+      if let error = validateTemplateOutput(rendered, filePath: filePath) {
+        throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
+      }
+      return rendered
     }
+    return nil
+  }
+
+  // MARK: - Template Output Validation
+
+  /// Validate rendered template output for critical issues.
+  /// Returns nil if valid, or an error description if the output is broken.
+  public func validateTemplateOutput(_ content: String, filePath: String) -> String? {
+    guard filePath.hasSuffix(".swift") else { return nil }
+
+    let nonBlankLines = content.components(separatedBy: "\n")
+      .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    if nonBlankLines.count < 3 {
+      return "Template output too short (\(nonBlankLines.count) non-blank lines)"
+    }
+
+    let opens = content.filter { $0 == "{" }.count
+    let closes = content.filter { $0 == "}" }.count
+    if opens != closes {
+      return "Unbalanced braces: \(opens) open, \(closes) close"
+    }
+
+    let name = (filePath as NSString).lastPathComponent.lowercased()
+    if name.contains("viewmodel") {
+      if !content.contains("class ") && !content.contains("@Observable") {
+        return "ViewModel missing class declaration or @Observable"
+      }
+    } else if name.contains("view") && !name.contains("preview") {
+      if !content.contains("View") || !content.contains("body") {
+        return "View missing View conformance or body property"
+      }
+    }
+    if name.contains("service") {
+      if !content.contains("actor ") && !content.contains("class ") && !content.contains("struct ") {
+        return "Service missing type declaration"
+      }
+    }
+
     return nil
   }
 
@@ -416,76 +536,204 @@ public struct TemplateRenderer: Sendable {
     }.render()
   }
 
-  // MARK: - Models File
+  // MARK: - Models File (flat)
 
-  public func renderModels(_ intent: ModelsFileIntent) -> String {
-    SwiftCode {
-      Import("Foundation")
-      for (_, model) in intent.models.enumerated() {
-        Blank()
-        Struct(model.typeName, conformances: model.conformances) {
-          for prop in model.properties where !prop.isEmpty {
-            Property(prop.hasPrefix("let ") || prop.hasPrefix("var ") ? prop : "let \(prop)")
-          }
+  public func renderModelFlat(_ intent: ModelFlatIntent) -> String {
+    let rawProps = [intent.property1, intent.property2, intent.property3, intent.property4]
+      .filter { !$0.isEmpty }
+    let conformances = intent.conformances.split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespaces) }
+      .filter { !$0.isEmpty }
+    let isCodable = conformances.contains("Codable")
+    let needsId = conformances.contains("Identifiable") && !rawProps.contains(where: { $0.contains("id") })
+
+    // Pre-sanitize properties outside the builder
+    let props: [String] = rawProps.map { prop in
+      var decl = prop.hasPrefix("let ") || prop.hasPrefix("var ") ? prop : "let \(prop)"
+      // Fix Codable: `let name = ""` → `let name: String` (decoder can't overwrite let initial)
+      if isCodable, decl.hasPrefix("let "), decl.contains(" = ") {
+        let parts = decl.split(separator: "=", maxSplits: 1)
+        let nameAndType = parts[0].trimmingCharacters(in: .whitespaces)
+        if !nameAndType.contains(":") {
+          let defaultVal = parts.count > 1 ? parts[1].trimmingCharacters(in: .whitespaces) : ""
+          let inferredType: String
+          if defaultVal.hasPrefix("\"") { inferredType = "String" }
+          else if defaultVal == "0" || defaultVal == "0.0" { inferredType = "Int" }
+          else if defaultVal == "true" || defaultVal == "false" { inferredType = "Bool" }
+          else if defaultVal == "[]" { inferredType = "[String]" }
+          else { inferredType = "String" }
+          return "\(nameAndType): \(inferredType)"
+        } else {
+          return String(nameAndType)
         }
+      }
+      return decl
+    }
+
+    return SwiftCode {
+      Import("Foundation")
+      Blank()
+      Struct(intent.typeName, conformances: conformances) {
+        if needsId { Property("var id = UUID()") }
+        for prop in props { Property(prop) }
       }
     }.render()
   }
 
   // MARK: - Service File
 
-  public func renderService(_ intent: ServiceIntent) -> String {
-    SwiftCode {
+  public func renderServiceFlat(_ intent: ServiceFlatIntent) -> String {
+    // Build query items from param names
+    let paramNames = intent.queryParamNames.split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespaces) }
+      .map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "=")) }
+    let fixedPairs = intent.fixedParams.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+    let dynamicParams = paramNames.filter { name in
+      !fixedPairs.contains(where: { $0.hasPrefix(name + "=") })
+    }
+
+    // Use methodParams for the function signature (friendly names), fall back to query param names.
+    // Sanitize: strip parentheses, ensure name: Type format, reject malformed input.
+    let rawParams = intent.methodParams
+      .trimmingCharacters(in: .whitespaces)
+      .trimmingCharacters(in: CharacterSet(charactersIn: "()"))
+    let paramSig: String
+    if rawParams.isEmpty || !rawParams.contains(":") || rawParams.contains(")(") {
+      paramSig = dynamicParams.map { "\($0): String" }.joined(separator: ", ")
+    } else {
+      paramSig = rawParams
+    }
+    let sig = "func \(intent.methodName)(\(paramSig)) async throws -> \(intent.returnType)"
+
+    // Map friendly param names → query param names for URLQueryItem values
+    let friendlyNames = paramSig.split(separator: ",").compactMap { part -> String? in
+      let trimmed = part.trimmingCharacters(in: .whitespaces)
+      return trimmed.split(separator: ":").first.map { String($0).trimmingCharacters(in: .whitespaces) }
+    }
+
+    return SwiftCode {
       Import("Foundation")
       Blank()
       Actor(intent.actorName) {
-        for (i, method) in intent.methods.enumerated() {
-          if i > 0 { Blank() }
-          let sig = method.signature.hasPrefix("func ") ? method.signature : "func \(method.signature)"
-          Function(sig) {
-            if !method.url.isEmpty {
-              Line("let url = URL(string: \"\(method.url)\")!")
-              Line("let (data, _) = try await URLSession.shared.data(from: url)")
-              if !method.decodedType.isEmpty {
-                Line("return try JSONDecoder().decode(\(method.decodedType).self, from: data)")
-              }
+        Function(sig) {
+          Line("var components = URLComponents(string: \"\(intent.baseURL)\")!")
+          Line("components.queryItems = [")
+          for (_, name) in paramNames.enumerated() {
+            if let fixed = fixedPairs.first(where: { $0.hasPrefix(name + "=") }) {
+              let value = String(fixed.split(separator: "=", maxSplits: 1).last ?? "")
+              Line("    URLQueryItem(name: \"\(name)\", value: \"\(value)\"),")
             } else {
-              Comment("TODO: implement")
+              // Use the friendly parameter name if available, otherwise the query param name
+              let dynamicIndex = dynamicParams.firstIndex(of: name) ?? 0
+              let varName = dynamicIndex < friendlyNames.count ? friendlyNames[dynamicIndex] : name
+              Line("    URLQueryItem(name: \"\(name)\", value: \(varName)),")
             }
+          }
+          Line("]")
+          Line("let (data, _) = try await URLSession.shared.data(from: components.url!)")
+          if intent.returnType.hasPrefix("[") {
+            // Array decode — need a wrapper struct
+            Line("struct SearchResult: Codable { let results: \(intent.returnType) }")
+            Line("let decoded = try JSONDecoder().decode(SearchResult.self, from: data)")
+            Line("return decoded.results")
+          } else {
+            Line("return try JSONDecoder().decode(\(intent.returnType).self, from: data)")
           }
         }
       }
     }.render()
   }
 
-  // MARK: - ViewModel File
+  // MARK: - ViewModel File (flat)
 
-  public func renderViewModel(_ intent: ViewModelIntent) -> String {
-    SwiftCode {
+  public func renderViewModelFlat(_ intent: ViewModelFlatIntent) -> String {
+    let props = [intent.property1, intent.property2, intent.property3].filter { !$0.isEmpty }
+
+    // Sanitize serviceCall: strip `service.` prefix and default value syntax from arguments
+    var sanitizedCall = intent.serviceCall.hasPrefix("service.")
+      ? String(intent.serviceCall.dropFirst(8)) : intent.serviceCall
+    sanitizedCall = sanitizedCall.replacingOccurrences(
+      of: #"\s*=\s*"[^"]*""#, with: "", options: .regularExpression
+    )
+    sanitizedCall = sanitizedCall.replacingOccurrences(
+      of: #"\s*=\s*\[\]"#, with: "", options: .regularExpression
+    )
+    // Also strip `= someDefault` patterns (but not `=` that's part of a comparison)
+    sanitizedCall = sanitizedCall.replacingOccurrences(
+      of: #":\s*(\w+)\s*=\s*\w+"#, with: ": $1", options: .regularExpression
+    )
+
+    return SwiftCode {
       Import("Foundation")
-      Import("Observation")
       Blank()
       Class(intent.className, attributes: ["@Observable"]) {
-        for prop in intent.stateProperties where !prop.isEmpty {
+        for prop in props {
           Property(prop.hasPrefix("var ") ? prop : "var \(prop)")
         }
-        if !intent.stateProperties.isEmpty { Blank() }
-        for prop in intent.privateProperties where !prop.isEmpty {
-          Property(prop)
+        if !props.isEmpty { Blank() }
+        Property("private let service = \(intent.serviceName)()")
+        Blank()
+        Function("func \(intent.methodName)() async") {
+          Line("do {")
+          Line("    \(intent.targetProperty) = try await service.\(sanitizedCall)")
+          Line("} catch {")
+          Line("    print(\"\\(error)\")")
+          Line("}")
         }
-        if !intent.privateProperties.isEmpty { Blank() }
-        for (i, method) in intent.methods.enumerated() {
-          if i > 0 { Blank() }
-          let params = method.parameters.isEmpty ? "" : "\(method.parameters)"
-          Function("func \(method.name)(\(params)) async") {
-            Line("isLoading = true")
-            Line("do {")
-            Line("    \(method.targetProperty) = try await \(method.serviceCall)")
-            Line("} catch {")
-            Line("    print(\"\\(error)\")")
-            Line("}")
-            Line("isLoading = false")
+      }
+    }.render()
+  }
+
+  // MARK: - ListView File
+
+  public func renderListView(_ intent: ListViewFlatIntent) -> String {
+    // Sanitize field values — strip quotes, parens, special chars that break interpolation
+    let sanitize: (String) -> String = { $0.filter { $0.isLetter || $0.isNumber || $0 == "_" } }
+    let isPropertyName: (String) -> Bool = { s in
+      guard let first = s.first else { return false }
+      return first.isLowercase  // Property names are camelCase, type names are PascalCase
+    }
+    let viewName = sanitize(intent.viewName).isEmpty ? "ListView" : sanitize(intent.viewName)
+    let vmType = sanitize(intent.viewModelType).isEmpty ? "ViewModel" : sanitize(intent.viewModelType)
+    let listProp = sanitize(intent.listProperty).isEmpty ? "items" : sanitize(intent.listProperty)
+    // Guard: reject type names (PascalCase) in property fields — fall back to "name"
+    let rawTitle = sanitize(intent.titleProperty)
+    let titleProp = rawTitle.isEmpty || !isPropertyName(rawTitle) ? "name" : rawTitle
+    let rawSubtitle = sanitize(intent.subtitleProperty)
+    let subtitleProp = !isPropertyName(rawSubtitle) ? "" : rawSubtitle
+    let searchProp = sanitize(intent.searchProperty)
+    let loadMethod = sanitize(intent.loadMethod).isEmpty ? "load" : sanitize(intent.loadMethod)
+    let navTitle = intent.navigationTitle.filter { $0 != "\"" }
+
+    let hasSearch = !searchProp.isEmpty
+    let hasSubtitle = !subtitleProp.isEmpty
+
+    return SwiftCode {
+      Import("SwiftUI")
+      Blank()
+      Struct(viewName, conformances: ["View"]) {
+        Property("@State var viewModel = \(vmType)()")
+        Blank()
+        ComputedVar("body", type: "some View") {
+          Line("NavigationStack {")
+          Line("    List(viewModel.\(listProp)) { item in")
+          if hasSubtitle {
+            Line("        VStack(alignment: .leading) {")
+            Line("            Text(item.\(titleProp))")
+            Line("            Text(item.\(subtitleProp))")
+            Line("                .font(.caption)")
+            Line("                .foregroundStyle(.secondary)")
+            Line("        }")
+          } else {
+            Line("        Text(item.\(titleProp))")
           }
+          Line("    }")
+          Line("    .navigationTitle(\"\(navTitle)\")")
+          if hasSearch {
+            Line("    .searchable(text: $viewModel.\(searchProp))")
+          }
+          Line("    .task { await viewModel.\(loadMethod)() }")
+          Line("}")
         }
       }
     }.render()

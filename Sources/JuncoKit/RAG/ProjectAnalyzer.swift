@@ -81,9 +81,16 @@ public struct ProjectSnapshot: Sendable {
 
   /// Condensed type signatures for injection into create prompts.
   /// Gives the LLM exact property/method names to reference and a do-not-redeclare instruction.
-  public func typeSignatureBlock(budget: Int = 150) -> String {
+  /// At step 4+, compresses to just type names (the model has seen full signatures earlier).
+  public func typeSignatureBlock(budget: Int = 150, stepIndex: Int = 0) -> String {
     let allTypes = models + services + views
     guard !allTypes.isEmpty else { return "" }
+
+    // At later steps, compress to just names to save ~120 tokens
+    if stepIndex >= 3 {
+      let names = allTypes.map { "\($0.kind) \($0.name)" }
+      return "// Known types: \(names.joined(separator: ", "))"
+    }
 
     var lines: [String] = ["// EXISTING TYPES — reference these, do NOT redeclare:"]
     for t in allTypes {
@@ -97,6 +104,29 @@ public struct ProjectSnapshot: Sendable {
 
     let result = lines.joined(separator: "\n")
     return TokenBudget.truncate(result, toTokens: budget)
+  }
+
+  /// Merge new types into an existing snapshot, replacing any from the same file.
+  /// Used to keep the snapshot current after creating/editing files mid-pipeline.
+  public func merging(
+    typesFromFile filePath: String,
+    newModels: [TypeSummary],
+    newViews: [TypeSummary],
+    newServices: [TypeSummary]
+  ) -> ProjectSnapshot {
+    // Remove any existing types from this file, then append new ones
+    let filteredModels = models.filter { $0.file != filePath } + newModels
+    let filteredViews = views.filter { $0.file != filePath } + newViews
+    let filteredServices = services.filter { $0.file != filePath } + newServices
+
+    return ProjectSnapshot(
+      models: filteredModels,
+      views: filteredViews,
+      services: filteredServices,
+      navigationPattern: navigationPattern,
+      testPattern: testPattern,
+      keyFiles: keyFiles
+    )
   }
 
   /// Empty snapshot for projects with no analyzable code.
@@ -189,6 +219,55 @@ public struct ProjectAnalyzer: Sendable {
       navigationPattern: navigationPattern,
       testPattern: testPattern,
       keyFiles: keyFiles
+    )
+  }
+
+  // MARK: - Incremental Updates
+
+  /// Update a snapshot after creating or editing a single file.
+  /// Re-indexes the file via TreeSitter and merges its types into the snapshot.
+  public func updateSnapshot(
+    _ snapshot: ProjectSnapshot,
+    afterWriting filePath: String,
+    content: String,
+    extractor: TreeSitterExtractor
+  ) -> ProjectSnapshot {
+    let entries = extractor.extract(from: content, file: filePath)
+    let typeEntries = entries.filter { $0.kind == .type }
+    let funcEntries = entries.filter { $0.kind == .function }
+    let propEntries = entries.filter { $0.kind == .property }
+
+    var newModels: [TypeSummary] = []
+    var newViews: [TypeSummary] = []
+    var newServices: [TypeSummary] = []
+
+    for typeEntry in typeEntries {
+      if typeEntry.symbolName.hasPrefix("extension ") { continue }
+
+      let typeProps = propEntries.map(\.symbolName)
+      let typeMethods = funcEntries.map(\.symbolName)
+      let (kind, conformances) = parseTypeDeclaration(typeEntry.snippet, name: typeEntry.symbolName)
+
+      let summary = TypeSummary(
+        name: typeEntry.symbolName, file: filePath, kind: kind,
+        properties: typeProps, methods: typeMethods, conformances: conformances
+      )
+
+      if conformances.contains("View") || filePath.contains("View") {
+        newViews.append(summary)
+      } else if kind == "actor" || typeEntry.symbolName.hasSuffix("Service") ||
+                  typeEntry.symbolName.hasSuffix("Manager") ||
+                  typeEntry.symbolName.hasSuffix("Store") {
+        newServices.append(summary)
+      } else if !typeProps.isEmpty || conformances.contains("Codable") ||
+                  conformances.contains("Identifiable") || conformances.contains("Hashable") {
+        newModels.append(summary)
+      }
+    }
+
+    return snapshot.merging(
+      typesFromFile: filePath,
+      newModels: newModels, newViews: newViews, newServices: newServices
     )
   }
 

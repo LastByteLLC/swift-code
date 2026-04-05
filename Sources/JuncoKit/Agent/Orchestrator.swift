@@ -1491,10 +1491,19 @@ public actor Orchestrator {
     do {
       var content: String = ""
 
-      // Route 1: Template (App entry points, Package.swift, services, viewmodels, views, etc.)
-      // On failure, retry template with stripped prompt before falling back to plain generation.
+      // Route 0: Pre-rendered content (deterministic scaffold output).
+      // If the specification IS the content (starts with import/@ — not a prompt), write directly.
       var usedTemplate = false
-      if templateRenderer.shouldUseTemplate(filePath: target) {
+      let specTrimmed = task.specification.trimmingCharacters(in: .whitespacesAndNewlines)
+      if specTrimmed.hasPrefix("import ") || specTrimmed.hasPrefix("@main") || specTrimmed.hasPrefix("// swift-tools") {
+        debug("Pre-rendered content for \(target)")
+        content = task.specification
+        usedTemplate = true
+      }
+
+      // Route 1: Template (services, viewmodels, views, etc.)
+      // On failure, retry template with stripped prompt before falling back to plain generation.
+      if !usedTemplate && templateRenderer.shouldUseTemplate(filePath: target) {
         do {
           if let rendered = try await templateRenderer.resolveTemplate(
                filePath: target, prompt: task.specification, adapter: adapter,
@@ -1552,7 +1561,12 @@ public actor Orchestrator {
         }
       }
 
-      // Validate and fix (shared across all routes)
+      // Per-file compile-verify-fix with API discovery hints
+      if target.hasSuffix(".swift") && !content.isEmpty {
+        content = await compileVerifyFix(content: content, filePath: target, memory: &memory)
+      }
+
+      // Validate and fix (syntax-level validation + linting)
       let validated = try await validateAndFix(content: content, filePath: target, memory: &memory)
       content = validated.content
       if let error = validated.error {
@@ -1948,6 +1962,71 @@ public actor Orchestrator {
       debug("CANDIDATE: multi-sample failed (\(error)), falling back to single-shot")
       return try await adapter.generate(prompt: prompt, system: system)
     }
+  }
+
+  // MARK: - Per-File Compile-Verify-Fix
+
+  /// Compile-check a Swift file and fix errors using runtime API discovery.
+  /// Each cycle: swiftc -typecheck → parse errors → lookup correct API → fix region → repeat.
+  private func compileVerifyFix(
+    content: String,
+    filePath: String,
+    memory: inout WorkingMemory,
+    maxCycles: Int = 2
+  ) async -> String {
+    var current = content
+    let tempDir = NSTemporaryDirectory()
+    let fileName = (filePath as NSString).lastPathComponent
+    let tempPath = (tempDir as NSString).appendingPathComponent("junco_cvf_\(fileName)")
+    defer { try? FileManager.default.removeItem(atPath: tempPath) }
+
+    for cycle in 0..<maxCycles {
+      // Write and compile
+      do { try current.write(toFile: tempPath, atomically: true, encoding: .utf8) } catch { break }
+      let result = await candidateGenerator.evaluate(code: current, filePath: fileName)
+      guard !result.compiled else {
+        if cycle > 0 { debug("CVF cycle \(cycle + 1): clean compile") }
+        return current
+      }
+      guard !result.errors.isEmpty else { break }
+
+      debug("CVF cycle \(cycle + 1): \(result.errorCount) errors")
+
+      // For each error, try to fix with API discovery hints
+      var fixed = current
+      for error in result.errors.prefix(2) {
+        // Look up the correct API signature
+        let hint = await apiProvider.lookupFix(compilerError: error)
+
+        // Extract the error region
+        let errors = errorExtractor.parseErrors(error)
+        guard let firstError = errors.first else { continue }
+        guard let region = errorExtractor.extractAST(content: fixed, errorLine: firstError.line)
+                ?? errorExtractor.extract(content: fixed, errorLine: firstError.line) else { continue }
+
+        // Build a minimal fix prompt
+        var fixPrompt = "Fix this code.\nError: \(String(firstError.message.prefix(150)))"
+        if let hint { fixPrompt += "\n\(hint)" }
+        fixPrompt += "\n\nCode:\n\(region.text)"
+
+        // Generate fix (plain text, small)
+        memory.trackCall(estimatedTokens: 400)
+        do {
+          let fixResult = try await adapter.generate(
+            prompt: fixPrompt,
+            system: "Fix ONLY the error. Return the corrected code region. No explanation."
+          )
+          let cleanFix = linter.cleanPlainTextOutput(fixResult, filePath: filePath)
+          if !cleanFix.isEmpty {
+            fixed = errorExtractor.splice(original: fixed, region: region, fix: cleanFix)
+          }
+        } catch {
+          break
+        }
+      }
+      current = fixed
+    }
+    return current
   }
 
   // MARK: - Validation + Fix Helper

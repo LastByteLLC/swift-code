@@ -549,12 +549,15 @@ public struct TaskResolver: Sendable {
       ))
     }
 
-    // Task 5: App entry point
+    // Task 5: App entry point — deterministic, no LLM call needed.
     let appTarget = "\(sourceDir)\(cap)App.swift"
     if !files.exists(appTarget) {
+      let appContent = TemplateRenderer().renderAppEntryPoint(AppEntryPointIntent(
+        appName: "\(cap)App", rootView: "\(cap)ListView", stateProperties: []
+      ))
       tasks.append(ConcreteTask(
         action: .create, target: appTarget,
-        specification: "Create \(appTarget).\n\n@main App struct \(cap)App with WindowGroup containing \(cap)ListView()."
+        specification: appContent
       ))
     }
 

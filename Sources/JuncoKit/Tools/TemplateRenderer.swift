@@ -168,6 +168,103 @@ public struct ListViewReducedIntent: Codable, Sendable {
   @Guide(description: "Item type name") public var itemType: String
 }
 
+// MARK: - KV-Line Initializers
+// These allow intent structs to be constructed from key-value dictionaries
+// parsed from plain text LLM output (the KV-line generation path).
+
+extension ModelFlatIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("typeName", "struct name"), ("property1", "first property like let title: String"),
+    ("property2", "second property"), ("property3", "third property or blank"),
+    ("property4", "fourth property or blank"), ("conformances", "like Codable, Identifiable"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(typeName: d["typeName"] ?? "Item", property1: d["property1"] ?? "",
+              property2: d["property2"] ?? "", property3: d["property3"] ?? "",
+              property4: d["property4"] ?? "", conformances: d["conformances"] ?? "Codable")
+  }
+}
+
+extension ServiceFlatIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("actorName", "service actor name"), ("methodName", "method name like fetchItems"),
+    ("methodParams", "parameters like query: String"), ("returnType", "like [Item] or Item"),
+    ("baseURL", "API base URL"), ("queryParamNames", "param names comma-separated"),
+    ("fixedParams", "fixed values like type=json, or blank"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(actorName: d["actorName"] ?? "DataService", methodName: d["methodName"] ?? "fetch",
+              methodParams: d["methodParams"] ?? "", returnType: d["returnType"] ?? "String",
+              baseURL: d["baseURL"] ?? "", queryParamNames: d["queryParamNames"] ?? "",
+              fixedParams: d["fixedParams"] ?? "")
+  }
+}
+
+extension ViewModelFlatIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("className", "ViewModel class name"), ("property1", "main collection property like var items: [Item] = []"),
+    ("property2", "second state property or blank"), ("property3", "third property or blank"),
+    ("serviceName", "service type name"), ("methodName", "async method name"),
+    ("serviceCall", "service method call like fetchItems(query: searchText)"),
+    ("targetProperty", "property to assign result to"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(className: d["className"] ?? "ViewModel", property1: d["property1"] ?? "",
+              property2: d["property2"] ?? "", property3: d["property3"] ?? "",
+              serviceName: d["serviceName"] ?? "", methodName: d["methodName"] ?? "load",
+              serviceCall: d["serviceCall"] ?? "", targetProperty: d["targetProperty"] ?? "items")
+  }
+}
+
+extension ViewModelReducedIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("className", "ViewModel class name"), ("property1", "main collection property"),
+    ("property2", "second state property or blank"), ("methodName", "async method name"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(className: d["className"] ?? "ViewModel", property1: d["property1"] ?? "",
+              property2: d["property2"] ?? "", methodName: d["methodName"] ?? "load")
+  }
+}
+
+extension ListViewFlatIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("viewName", "view struct name"), ("viewModelType", "ViewModel type"),
+    ("listProperty", "list data property"), ("itemType", "item type name"),
+    ("titleProperty", "primary text property like title"), ("subtitleProperty", "secondary text or blank"),
+    ("searchProperty", "search property or blank"), ("loadMethod", "async load method"),
+    ("navigationTitle", "navigation bar title"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(viewName: d["viewName"] ?? "ListView", viewModelType: d["viewModelType"] ?? "",
+              listProperty: d["listProperty"] ?? "items", itemType: d["itemType"] ?? "Item",
+              titleProperty: d["titleProperty"] ?? "name", subtitleProperty: d["subtitleProperty"] ?? "",
+              searchProperty: d["searchProperty"] ?? "", loadMethod: d["loadMethod"] ?? "load",
+              navigationTitle: d["navigationTitle"] ?? "Items")
+  }
+}
+
+extension ListViewReducedIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("viewName", "view struct name"), ("navigationTitle", "navigation bar title"),
+    ("itemType", "item type name"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(viewName: d["viewName"] ?? "ListView", navigationTitle: d["navigationTitle"] ?? "",
+              itemType: d["itemType"] ?? "Item")
+  }
+}
+
+extension AppEntryPointIntent {
+  static let kvFields: [(key: String, hint: String)] = [
+    ("appName", "App struct name"), ("rootView", "root view type"),
+  ]
+  init(fromKV d: [String: String]) {
+    self.init(appName: d["appName"] ?? "MyApp", rootView: d["rootView"] ?? "ContentView",
+              stateProperties: [])
+  }
+}
+
 // MARK: - Code Fragment (for targeted retry)
 
 @Generable
@@ -216,6 +313,20 @@ public struct TemplateRenderer: Sendable {
     return nil
   }
 
+  /// Generate KV-line output from the LLM and parse into a dictionary.
+  /// Falls back to JSON parsing if KV parsing yields too few fields.
+  private func generateKV(
+    fields: [(key: String, hint: String)],
+    prompt: String,
+    system: String,
+    adapter: any LLMAdapter
+  ) async throws -> [String: String] {
+    let kvHeader = KVLineParser.promptHeader(fields: fields)
+    let fullPrompt = "\(kvHeader)\n\n\(prompt)"
+    let raw = try await adapter.generate(prompt: fullPrompt, system: system)
+    return KVLineParser.parseWithFallback(raw, expectedFields: fields.count)
+  }
+
   /// Generate template content by dispatching to the appropriate intent type and renderer.
   /// Returns nil if the file path doesn't match any template.
   public func resolveTemplate(
@@ -246,29 +357,36 @@ public struct TemplateRenderer: Sendable {
       let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: XcconfigIntent.self, options: nil)
       return renderXcconfig(intent)
     } else if name.hasSuffix("app.swift") {
-      var intent = try await adapter.generateStructured(prompt: prompt, system: system, as: AppEntryPointIntent.self, options: nil)
-      // Override rootView from snapshot if a View type exists (model often defaults to "ContentView")
+      // KV-line path for App entry point (2 fields)
+      let dict = try await generateKV(fields: AppEntryPointIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+      var intent = AppEntryPointIntent(fromKV: dict)
       if let firstView = snapshot.views.first, intent.rootView == "ContentView" || intent.rootView.isEmpty {
         intent.rootView = firstView.name
       }
       return renderAppEntryPoint(intent)
+
     } else if name.contains("model") && name.hasSuffix(".swift") && !name.contains("viewmodel") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ModelFlatIntent.self, options: nil)
+      // KV-line path for Model (6 fields)
+      let dict = try await generateKV(fields: ModelFlatIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+      let intent = ModelFlatIntent(fromKV: dict)
       return renderModelFlat(intent)
+
     } else if name.contains("service") && name.hasSuffix(".swift") {
-      let intent = try await adapter.generateStructured(prompt: prompt, system: system, as: ServiceFlatIntent.self, options: nil)
+      // KV-line path for Service (7 fields)
+      let dict = try await generateKV(fields: ServiceFlatIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+      let intent = ServiceFlatIntent(fromKV: dict)
       let rendered = renderServiceFlat(intent)
       if let error = validateTemplateOutput(rendered, filePath: filePath) {
         throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
       }
       return rendered
+
     } else if name.contains("viewmodel") && name.hasSuffix(".swift") {
       let deriver = SnapshotDeriver()
-      // Snapshot-driven reduced path (4 fields) when service data is available
+      // Snapshot-driven KV-line path (4 fields) when service data is available
       if !snapshot.services.isEmpty {
-        let reduced = try await adapter.generateStructured(
-          prompt: prompt, system: system, as: ViewModelReducedIntent.self, options: nil
-        )
+        let dict = try await generateKV(fields: ViewModelReducedIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+        let reduced = ViewModelReducedIntent(fromKV: dict)
         if let full = deriver.deriveViewModel(reduced: reduced, snapshot: snapshot) {
           let rendered = renderViewModelFlat(full)
           if let error = validateTemplateOutput(rendered, filePath: filePath) {
@@ -277,24 +395,23 @@ public struct TemplateRenderer: Sendable {
           return rendered
         }
       }
-      // Fallback: full 8-field intent
-      let intent = try await adapter.generateStructured(
-        prompt: prompt, system: system, as: ViewModelFlatIntent.self, options: nil
-      )
+      // Fallback: KV-line with full 8 fields
+      let dict = try await generateKV(fields: ViewModelFlatIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+      let intent = ViewModelFlatIntent(fromKV: dict)
       let rendered = renderViewModelFlat(intent)
       if let error = validateTemplateOutput(rendered, filePath: filePath) {
         throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
       }
       return rendered
+
     } else if name.contains("view") && name.hasSuffix(".swift") && !name.contains("preview") {
       let deriver = SnapshotDeriver()
       let hasVM = (snapshot.services + snapshot.models).contains(where: { $0.name.contains("ViewModel") })
       let hasModel = snapshot.models.contains(where: { !$0.name.contains("ViewModel") })
-      // Snapshot-driven reduced path (3 fields) when ViewModel + Model data available
+      // Snapshot-driven KV-line path (3 fields) when ViewModel + Model data available
       if hasVM && hasModel {
-        let reduced = try await adapter.generateStructured(
-          prompt: prompt, system: system, as: ListViewReducedIntent.self, options: nil
-        )
+        let dict = try await generateKV(fields: ListViewReducedIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+        let reduced = ListViewReducedIntent(fromKV: dict)
         if let full = deriver.deriveListView(reduced: reduced, snapshot: snapshot) {
           let rendered = renderListView(full)
           if let error = validateTemplateOutput(rendered, filePath: filePath) {
@@ -303,10 +420,9 @@ public struct TemplateRenderer: Sendable {
           return rendered
         }
       }
-      // Fallback: full 9-field intent
-      let intent = try await adapter.generateStructured(
-        prompt: prompt, system: system, as: ListViewFlatIntent.self, options: nil
-      )
+      // Fallback: KV-line with full 9 fields
+      let dict = try await generateKV(fields: ListViewFlatIntent.kvFields, prompt: prompt, system: system, adapter: adapter)
+      let intent = ListViewFlatIntent(fromKV: dict)
       let rendered = renderListView(intent)
       if let error = validateTemplateOutput(rendered, filePath: filePath) {
         throw PipelineError.validationFailed(file: filePath, error: "Template: \(error)")
@@ -549,7 +665,7 @@ public struct TemplateRenderer: Sendable {
 
     // Pre-sanitize properties outside the builder
     let props: [String] = rawProps.map { prop in
-      var decl = prop.hasPrefix("let ") || prop.hasPrefix("var ") ? prop : "let \(prop)"
+      let decl = prop.hasPrefix("let ") || prop.hasPrefix("var ") ? prop : "let \(prop)"
       // Fix Codable: `let name = ""` → `let name: String` (decoder can't overwrite let initial)
       if isCodable, decl.hasPrefix("let "), decl.contains(" = ") {
         let parts = decl.split(separator: "=", maxSplits: 1)

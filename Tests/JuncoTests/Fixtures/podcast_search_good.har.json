@@ -1,0 +1,22 @@
+{
+  "log": {
+    "version": "1.2",
+    "creator": {
+      "name": "junco-replay",
+      "version": "1.0"
+    },
+    "entries": [
+      {
+        "request": {
+          "prompt": "Create a Swift function that searches Apple Podcasts by term and returns podcast names. Use the iTunes Search API at https://itunes.apple.com/search",
+          "system": "Generate Swift code. Output a CreateParams JSON with filePath and content.",
+          "typeName": "CreateParams"
+        },
+        "response": {
+          "json": "{\"filePath\":\"PodcastSearch.swift\",\"content\":\"import Foundation\\n\\nstruct PodcastResult: Codable {\\n  let resultCount: Int\\n  let results: [Podcast]\\n}\\n\\nstruct Podcast: Codable {\\n  let trackName: String\\n  let artistName: String\\n  let feedUrl: String?\\n  let artworkUrl600: String?\\n}\\n\\nfunc searchPodcasts(term: String, limit: Int = 10) async throws -> [Podcast] {\\n  var components = URLComponents(string: \\\"https://itunes.apple.com/search\\\")!\\n  components.queryItems = [\\n    URLQueryItem(name: \\\"term\\\", value: term),\\n    URLQueryItem(name: \\\"media\\\", value: \\\"podcast\\\"),\\n    URLQueryItem(name: \\\"limit\\\", value: String(limit)),\\n  ]\\n  let (data, _) = try await URLSession.shared.data(from: components.url!)\\n  let result = try JSONDecoder().decode(PodcastResult.self, from: data)\\n  return result.results\\n}\"}",
+          "timeMs": 2340
+        }
+      }
+    ]
+  }
+}

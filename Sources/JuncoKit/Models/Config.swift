@@ -38,6 +38,12 @@ public enum Config {
   /// Maximum retries when code validation (Swift) fails.
   public static let maxValidationRetries = 1
 
+  /// Number of candidates to generate for multi-sample compile-select.
+  public static let candidateCount = 3
+
+  /// Temperature for candidate generation (higher = more diverse candidates).
+  public static let candidateTemperature = 0.8
+
   /// Whether to sandbox bash commands via sandbox-exec.
   public static let sandboxEnabled = true
 

@@ -31,6 +31,8 @@ public actor Orchestrator {
   private let errorExtractor: ErrorRegionExtractor
   private let templateRenderer: TemplateRenderer
   private let webResearch: WebResearch
+  private let candidateGenerator: CandidateGenerator
+  private let signatureIndex: SignatureIndex
   private let workingDirectory: String
   public let domain: DomainConfig
   private let intentClassifier: IntentClassifier
@@ -81,6 +83,13 @@ public actor Orchestrator {
     self.errorExtractor = ErrorRegionExtractor()
     self.templateRenderer = TemplateRenderer()
     self.webResearch = WebResearch()
+    self.candidateGenerator = CandidateGenerator(
+      adapter: adapter,
+      shell: SafeShell(workingDirectory: workingDirectory),
+      candidateCount: Config.candidateCount,
+      temperature: Config.candidateTemperature
+    )
+    self.signatureIndex = SignatureIndex.builtIn()
     self.metrics = SessionMetrics()
   }
 
@@ -1691,11 +1700,20 @@ public actor Orchestrator {
 
       let createPrompt = "Create \(createTarget).\nRequest: \(TokenBudget.truncate(memory.query, toTokens: 150))\(createURLHint)"
 
-      // Plain text generation — TokenGuard applied automatically in adapter
-      var content = try await adapter.generate(prompt: createPrompt, system: createSystem)
+      // For Swift files: multi-sample compile-select using CandidateGenerator.
+      // Generates N candidates, compiles each, returns the first that passes.
+      // Falls back to single-shot for non-Swift files.
+      var content: String
+      if createTargetLower.hasSuffix(".swift") {
+        content = try await generateWithCandidates(
+          prompt: createPrompt, system: createSystem,
+          filePath: createTarget, memory: &memory
+        )
+      } else {
+        content = try await adapter.generate(prompt: createPrompt, system: createSystem)
+      }
       content = linter.cleanPlainTextOutput(content, filePath: createTarget)
-      let path = createTarget.isEmpty ? createTarget : createTarget
-      return .create(path: path, content: content)
+      return .create(path: createTarget, content: content)
 
     case .write:
       let writeURLs = Self.extractURLs(memory.query)
@@ -1805,6 +1823,59 @@ public actor Orchestrator {
     result = linter.lint(content: result, filePath: path)
 
     return result
+  }
+
+  // MARK: - Multi-Sample Compile-Select
+
+  /// Generate Swift code using multi-sample compile-select.
+  /// Generates N candidates, compiles each, returns the first that passes.
+  /// If none compile, enriches the fix prompt with correct API signatures from SignatureIndex.
+  private func generateWithCandidates(
+    prompt: String,
+    system: String,
+    filePath: String,
+    memory: inout WorkingMemory
+  ) async throws -> String {
+    // Use CreateParams for structured generation to get both path and content
+    memory.trackCall(estimatedTokens: 600 * Config.candidateCount)
+
+    let structuredSystem = system + "\nRespond with a JSON object with filePath and content fields."
+    do {
+      let (value, result) = try await candidateGenerator.generate(
+        prompt: prompt,
+        system: structuredSystem,
+        as: CreateParams.self,
+        filePath: filePath,
+        extract: { $0.content }
+      )
+
+      if result.compiled {
+        debug("CANDIDATE: compiled on attempt (0 errors)")
+        return value.content
+      }
+
+      // None compiled — try enriching with signature hints
+      debug("CANDIDATE: best has \(result.errorCount) errors, trying signature-enriched fix")
+      let (_, hints) = await candidateGenerator.evaluateAndSuggestFix(
+        code: value.content, filePath: filePath, signatureIndex: signatureIndex
+      )
+
+      if !hints.isEmpty {
+        let hintText = hints.joined(separator: "\n")
+        let fixPrompt = "Fix this code.\nErrors:\n\(result.errors.prefix(3).joined(separator: "\n"))\n\n\(hintText)\n\nCode:\n\(value.content)"
+        let fixSystem = "Fix ONLY the errors. Use the correct API signatures provided. Return the complete corrected file."
+        let fixed = try await adapter.generate(prompt: fixPrompt, system: fixSystem)
+        return linter.cleanPlainTextOutput(fixed, filePath: filePath)
+      }
+
+      // No signature hints available — return best candidate as-is
+      return value.content
+
+    } catch {
+      // Fall back to single-shot plain text generation
+      debug("CANDIDATE: multi-sample failed (\(error)), falling back to single-shot")
+      return try await adapter.generate(prompt: prompt, system: system)
+    }
   }
 
   // MARK: - Validation + Fix Helper

@@ -47,7 +47,8 @@ let package = Package(
     .testTarget(
       name: "JuncoTests",
       dependencies: ["JuncoKit"],
-      path: "Tests/JuncoTests"
+      path: "Tests/JuncoTests",
+      exclude: ["Fixtures"]
     ),
   ]
 )

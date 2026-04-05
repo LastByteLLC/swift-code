@@ -15,7 +15,9 @@ public struct PostGenerationLinter: Sendable {
     guard filePath.hasSuffix(".swift") else { return content }
     var result = content
     result = fixObservablePublished(result)
+    result = fixStateObjectWithObservable(result)
     result = fixNavigationView(result)
+    result = fixHallucinatedModifiers(result)
     result = fixMissingImports(result)
     result = fixXCTestToSwiftTesting(result)
     return result
@@ -49,6 +51,84 @@ public struct PostGenerationLinter: Sendable {
   private func fixNavigationView(_ content: String) -> String {
     guard content.contains("NavigationView") else { return content }
     return content.replacingOccurrences(of: "NavigationView", with: "NavigationStack")
+  }
+
+  /// @StateObject is incompatible with @Observable — use @State instead.
+  /// Only applies when the file doesn't use ObservableObject or Combine.
+  private func fixStateObjectWithObservable(_ content: String) -> String {
+    guard content.contains("@StateObject") else { return content }
+    // @StateObject requires ObservableObject (Combine). If neither is present, use @State.
+    if !content.contains("ObservableObject") && !content.contains("import Combine") {
+      return content.replacingOccurrences(of: "@StateObject", with: "@State")
+    }
+    return content
+  }
+
+  /// Fix known hallucinated SwiftUI modifiers.
+  private func fixHallucinatedModifiers(_ content: String) -> String {
+    var result = content
+    // .fontSize(N) → .font(.system(size: N))
+    result = result.replacingOccurrences(
+      of: #"\.fontSize\((\d+)\)"#,
+      with: ".font(.system(size: $1))",
+      options: .regularExpression
+    )
+    // Image(systemName: "x", style: .y) → Image(systemName: "x")
+    result = result.replacingOccurrences(
+      of: #"Image\(systemName:\s*"([^"]+)",\s*style:\s*[^)]+\)"#,
+      with: #"Image(systemName: "$1")"#,
+      options: .regularExpression
+    )
+    return result
+  }
+
+  /// Remove type declarations that duplicate existing project types.
+  /// Called from Orchestrator with the set of known type names from the project snapshot.
+  public func removeDuplicateTypes(_ content: String, existingTypeNames: Set<String>) -> String {
+    guard !existingTypeNames.isEmpty else { return content }
+    var lines = content.components(separatedBy: "\n")
+    let declarationPattern = #"^(public\s+|private\s+|internal\s+|open\s+|fileprivate\s+)?(struct|class|actor|enum)\s+(\w+)"#
+    let regex = try? NSRegularExpression(pattern: declarationPattern)
+
+    // Find ranges of duplicate type declarations to remove
+    var removeRanges: [(start: Int, end: Int)] = []
+    var i = 0
+    while i < lines.count {
+      let line = lines[i]
+      if let match = regex?.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)),
+         let nameRange = Range(match.range(at: 3), in: line) {
+        let typeName = String(line[nameRange])
+        if existingTypeNames.contains(typeName) {
+          // Find the matching closing brace
+          var braceDepth = 0
+          var end = i
+          for j in i..<lines.count {
+            for ch in lines[j] {
+              if ch == "{" { braceDepth += 1 }
+              if ch == "}" { braceDepth -= 1 }
+            }
+            end = j
+            if braceDepth <= 0 && j > i { break }
+          }
+          removeRanges.append((start: i, end: end))
+          i = end + 1
+          continue
+        }
+      }
+      i += 1
+    }
+
+    // Remove in reverse order to preserve indices
+    for range in removeRanges.reversed() {
+      lines.removeSubrange(range.start...range.end)
+    }
+
+    // Clean up consecutive blank lines left by removal
+    var result = lines.joined(separator: "\n")
+    while result.contains("\n\n\n") {
+      result = result.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+    }
+    return result
   }
 
   /// Add missing imports based on type usage.

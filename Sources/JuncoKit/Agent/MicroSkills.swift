@@ -156,6 +156,24 @@ public struct SkillLoader: Sendable {
         tools: nil, maxSteps: nil
       ),
       MicroSkill(
+        name: "swiftui-patterns",
+        domain: "swift", taskTypes: ["add", "fix", "refactor"],
+        hint: """
+          @State for view-local state, @Binding for parent-owned, @Environment for DI. \
+          Extract subviews over long body expressions. Never force-unwrap in view body. \
+          Use .task {} not .onAppear for async work. Prefer value types. \
+          IMPORTANT: Use @Observable, NOT ObservableObject. @Observable does NOT use @Published — \
+          properties are tracked automatically. Use @ObservationIgnored to opt out. \
+          Use @State (NOT @StateObject) for @Observable classes. \
+          NavigationStack (not NavigationView). FormatStyle (not DateFormatter). \
+          NavigationStack with .navigationDestination(for: Type.self) { item in DetailView(item: item) }. \
+          Use NavigationLink(value: item) inside ForEach, not NavigationLink(destination:). \
+          Do NOT use .fontSize() — use .font(.system(size:)). \
+          Do NOT use Image(systemName:style:) — style parameter does not exist.
+          """,
+        tools: nil, maxSteps: nil
+      ),
+      MicroSkill(
         name: "swift-networking",
         domain: "swift", taskTypes: ["add", "fix"],
         hint: """
@@ -167,17 +185,14 @@ public struct SkillLoader: Sendable {
         tools: nil, maxSteps: nil
       ),
       MicroSkill(
-        name: "swiftui-patterns",
-        domain: "swift", taskTypes: ["add", "fix", "refactor"],
+        name: "swift-async",
+        domain: "swift", taskTypes: ["add", "fix"],
         hint: """
-          @State for view-local state, @Binding for parent-owned, @Environment for DI. \
-          Extract subviews over long body expressions. Never force-unwrap in view body. \
-          Use .task {} not .onAppear for async work. Prefer value types. \
-          IMPORTANT: Use @Observable, NOT ObservableObject. @Observable does NOT use @Published — \
-          properties are tracked automatically. Use @ObservationIgnored to opt out. \
-          NavigationStack (not NavigationView). FormatStyle (not DateFormatter). \
-          NavigationStack with .navigationDestination(for: Type.self) { item in DetailView(item: item) }. \
-          Use NavigationLink(value: item) inside ForEach, not NavigationLink(destination:).
+          When calling async throws functions, assign directly: let items = try await service.fetchAll(). \
+          Do NOT use trailing closure callbacks after async calls. \
+          WRONG: try await service.fetch { result in }. \
+          RIGHT: let result = try await service.fetch(). \
+          Wrap in do { try await ... } catch { } if enclosing function is not throws.
           """,
         tools: nil, maxSteps: nil
       ),

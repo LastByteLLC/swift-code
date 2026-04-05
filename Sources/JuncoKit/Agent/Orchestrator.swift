@@ -1438,10 +1438,13 @@ public actor Orchestrator {
       return StepObservation(tool: "create", outcome: .error, keyFact: "Empty target path")
     }
 
-    // Check if file already exists
+    // Check if file already exists — allow overwrite if it was touched in this session
     if files.exists(target) {
-      return StepObservation(tool: "create", outcome: .error,
-                             keyFact: "File already exists: \(target). Use edit to modify.")
+      if !memory.touchedFiles.contains(target) {
+        return StepObservation(tool: "create", outcome: .error,
+                               keyFact: "File already exists: \(target). Use edit to modify.")
+      }
+      debug("Overwriting \(target) from prior attempt in this session")
     }
 
     do {
@@ -1457,10 +1460,22 @@ public actor Orchestrator {
       // Route 2: Plain generation with two-phase overflow fallback
       else {
         do {
-          let system = Prompts.createSystem(domain: domain)
+          var system = Prompts.createSystem(domain: domain)
+          if target.hasSuffix(".swift") {
+            if let hint = skillLoader.skillHints(
+              domain: memory.intent?.domain ?? "swift",
+              taskType: memory.intent?.taskType ?? "add", budget: 100) {
+              system += " " + hint
+            }
+          }
           memory.trackCall(estimatedTokens: TokenBudget.execute.total)
           content = try await adapter.generate(prompt: task.specification, system: system)
           content = linter.cleanPlainTextOutput(content, filePath: target)
+          // Strip type declarations that duplicate existing project types
+          let existingNames = Set(
+            (projectSnapshot.models + projectSnapshot.services + projectSnapshot.views).map(\.name)
+          )
+          content = linter.removeDuplicateTypes(content, existingTypeNames: existingNames)
         } catch let error as LLMError {
           if case .contextOverflow = error, target.hasSuffix(".swift") {
             debug("Context overflow on create — falling back to two-phase generation")
@@ -1801,6 +1816,7 @@ public actor Orchestrator {
     memory: inout WorkingMemory
   ) async throws -> (content: String, error: String?) {
     var content = linter.lint(content: content, filePath: filePath)
+    let originalContent = content // preserve pre-retry content
 
     var retries = 0
     while retries < Config.maxValidationRetries {
@@ -1832,6 +1848,12 @@ public actor Orchestrator {
     }
 
     if let finalError = validatorRegistry.validate(code: content, filePath: filePath) {
+      // If retries made it worse, fall back to the original if it validates
+      if retries > 0,
+         validatorRegistry.validate(code: originalContent, filePath: filePath) == nil {
+        debug("Retries degraded content for \(filePath) — reverting to original")
+        return (originalContent, nil)
+      }
       debug("Validation failed after \(retries) retries for \(filePath): \(finalError)")
       return (content, "VALIDATION FAILED: \(finalError)")
     }

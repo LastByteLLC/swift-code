@@ -167,10 +167,16 @@ public struct TaskResolver: Sendable {
   ) -> String {
     var spec = "Create \(target).\n\nUser request: \(query)\n"
 
-    // Add project context
-    let context = snapshot.compactDescription(budget: 300)
+    // Add project context (high-level summary)
+    let context = snapshot.compactDescription(budget: 150)
     if !context.isEmpty {
       spec += "\nProject context:\n\(context)\n"
+    }
+
+    // Add type signatures so the LLM uses exact property/method names
+    let typeBlock = snapshot.typeSignatureBlock(budget: 150)
+    if !typeBlock.isEmpty {
+      spec += "\n\(typeBlock)\n"
     }
 
     // Add explicit context (@-files, URLs)

@@ -79,6 +79,26 @@ public struct ProjectSnapshot: Sendable {
     return TokenBudget.truncate(result, toTokens: budget)
   }
 
+  /// Condensed type signatures for injection into create prompts.
+  /// Gives the LLM exact property/method names to reference and a do-not-redeclare instruction.
+  public func typeSignatureBlock(budget: Int = 150) -> String {
+    let allTypes = models + services + views
+    guard !allTypes.isEmpty else { return "" }
+
+    var lines: [String] = ["// EXISTING TYPES — reference these, do NOT redeclare:"]
+    for t in allTypes {
+      let conformances = t.conformances.isEmpty ? "" : ": \(t.conformances.joined(separator: ", "))"
+      let props = t.properties.map { $0.trimmingCharacters(in: .whitespaces) }
+      let meths = t.methods.map { $0.trimmingCharacters(in: .whitespaces) }
+      let members = (props + meths).joined(separator: "; ")
+      let body = members.isEmpty ? "" : " { \(members) }"
+      lines.append("// \(t.kind) \(t.name)\(conformances)\(body)")
+    }
+
+    let result = lines.joined(separator: "\n")
+    return TokenBudget.truncate(result, toTokens: budget)
+  }
+
   /// Empty snapshot for projects with no analyzable code.
   public static let empty = ProjectSnapshot(
     models: [], views: [], services: [],

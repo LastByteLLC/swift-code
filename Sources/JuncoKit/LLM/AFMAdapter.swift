@@ -138,29 +138,21 @@ public actor AFMAdapter: LLMAdapter {
   // MARK: - Token counting
 
   public func countTokens(_ text: String) async -> Int {
-    if #available(macOS 26.4, iOS 26.4, *) {
-      return await _tokenCount(text)
-    }
+    #if compiler(>=6.3)
+    let fmModel: FoundationModels.SystemLanguageModel = loraAdapter.map { .init(adapter: $0) } ?? .default
+    return (try? await fmModel.tokenCount(for: text)) ?? TokenBudget.estimate(text)
+    #else
     return TokenBudget.estimate(text)
+    #endif
   }
 
   public var contextSize: Int {
-    if #available(macOS 26.4, iOS 26.4, *) {
-      return _contextSize
-    }
-    return 4096
-  }
-
-  @available(macOS 26.4, iOS 26.4, *)
-  private func _tokenCount(_ text: String) async -> Int {
-    let fmModel: FoundationModels.SystemLanguageModel = loraAdapter.map { .init(adapter: $0) } ?? .default
-    return (try? await fmModel.tokenCount(for: text)) ?? TokenBudget.estimate(text)
-  }
-
-  @available(macOS 26.4, iOS 26.4, *)
-  private var _contextSize: Int {
+    #if compiler(>=6.3)
     let fmModel: FoundationModels.SystemLanguageModel = loraAdapter.map { .init(adapter: $0) } ?? .default
     return fmModel.contextSize
+    #else
+    return 4096
+    #endif
   }
 
   // MARK: - Error mapping

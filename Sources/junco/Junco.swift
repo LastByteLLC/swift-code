@@ -821,8 +821,7 @@ struct Junco: AsyncParsableCommand {
       let duration = Double(arg ?? "5") ?? 5
       Terminal.line(Style.dim("Listening for \(Int(duration))s... speak now"))
       let speech = SpeechService()
-      let available = await speech.isAvailable
-      guard available else {
+      guard await speech.isAvailable else {
         Terminal.line(Style.yellow("Speech recognition not available on this device."))
         break
       }

@@ -43,7 +43,7 @@ struct CommandHistoryTests {
     defer { cleanup(dir) }
     history.append("")
     history.append("   ")
-    #expect(history.count == 0)
+    #expect(history.isEmpty)
   }
 
   @Test("respects max entries")

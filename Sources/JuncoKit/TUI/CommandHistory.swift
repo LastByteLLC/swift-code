@@ -51,6 +51,9 @@ public struct CommandHistory: Sendable {
 
   /// Get the number of history entries.
   public var count: Int { load().count }
+
+  /// Whether the history is empty.
+  public var isEmpty: Bool { load().isEmpty }
 }
 
 /// Navigable history for the line editor.

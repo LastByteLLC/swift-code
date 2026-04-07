@@ -13,7 +13,7 @@ jobs:
   # Gate: run the full CI suite first
   test:
     name: Test
-    runs-on: macos-15
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +42,7 @@ jobs:
   release:
     name: Release
     needs: test
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: write
     steps:

@@ -59,6 +59,18 @@ struct Junco: AsyncParsableCommand {
   // Shared services (lazy initialized)
   private var cwd: String { directory ?? FileManager.default.currentDirectoryPath }
 
+  /// Check that Xcode and Swift toolchain are installed.
+  private func checkSwiftToolchain() -> Bool {
+    guard TemplateRenderer.isSwiftAvailable() else {
+      print("Swift toolchain not found.")
+      print("")
+      print("Junco requires Xcode and the Swift compiler to validate generated code.")
+      print("Install Xcode from the App Store, then run: xcode-select --install")
+      return false
+    }
+    return true
+  }
+
   /// Check that Apple Intelligence is available. Prompts user to enable it if not.
   private func checkAppleIntelligence() -> Bool {
     let model = FoundationModels.SystemLanguageModel.default
@@ -168,6 +180,9 @@ struct Junco: AsyncParsableCommand {
           "\u{1B}[33m⚠ No Swift project detected. Create Package.swift or run from a project directory.\u{1B}[0m\n".utf8))
       }
     }
+
+    // --- Check Swift toolchain ---
+    if !checkSwiftToolchain() { return }
 
     // --- Resolve backend ---
     let resolvedAdapter: any LLMAdapter

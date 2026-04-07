@@ -86,6 +86,27 @@ public struct TokenGuard: Sendable {
     return (currentSystem, currentPrompt)
   }
 
+  // MARK: - Overflow Detection
+
+  /// Check if a system+prompt pair will likely overflow the model's context window.
+  /// Returns true if estimated usage exceeds 80% of context, meaning the caller
+  /// should use an alternative strategy (e.g. two-phase generation).
+  public static func willOverflow(
+    system: String,
+    prompt: String,
+    adapter: any LLMAdapter,
+    reserveForGeneration: Int = 1500,
+    schemaOverhead: Int = 0
+  ) async -> Bool {
+    let contextSize = await adapter.contextSize
+    let safetyMargin = contextSize * Config.tokenSafetyMarginPercent / 100
+    let budget = contextSize - reserveForGeneration - schemaOverhead - safetyMargin
+
+    let systemTokens = estimate(system)
+    let promptTokens = estimate(prompt)
+    return systemTokens + promptTokens > budget * 80 / 100
+  }
+
   // MARK: - Helpers
 
   /// Strip appended skill hints from a system prompt, keeping the base instruction.

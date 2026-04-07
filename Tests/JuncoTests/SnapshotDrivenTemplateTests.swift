@@ -360,6 +360,14 @@ struct AppScaffoldTests {
     #expect(TaskResolver.inferAppDomain("build an expense app") == "expense")
   }
 
+  @Test("inferAppDomain extracts domain from verb+noun patterns")
+  func inferDomainVerbNoun() {
+    #expect(TaskResolver.inferAppDomain("Create a service to fetch podcasts from the iTunes API") == "podcast")
+    #expect(TaskResolver.inferAppDomain("Build a feature to track expenses") == "expense")
+    #expect(TaskResolver.inferAppDomain("show weather forecasts") == "weather")
+    #expect(TaskResolver.inferAppDomain("search recipes by ingredient") == "recipe")
+  }
+
   @Test("inferAppDomain falls back to 'item' for unrecognized patterns")
   func inferDomainFallback() {
     #expect(TaskResolver.inferAppDomain("do something cool") == "item")

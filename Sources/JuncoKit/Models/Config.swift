@@ -88,6 +88,16 @@ public enum Config {
   /// Reserved as buffer for token estimation errors. 5% ≈ 200 tokens at 4K.
   public static let tokenSafetyMarginPercent = 5
 
+  // MARK: - Language Detection
+
+  /// Minimum confidence from NLLanguageRecognizer to treat detection as valid.
+  public static let languageDetectionConfidence = 0.85
+
+  // MARK: - Swift Toolchain
+
+  /// Default swift-tools-version when detection fails.
+  public static let defaultSwiftToolsVersion = "6.0"
+
   // MARK: - Persistence Paths
 
   /// Per-project junco directory name.

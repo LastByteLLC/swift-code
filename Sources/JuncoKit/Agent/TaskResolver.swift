@@ -18,6 +18,8 @@ public struct ConcreteTask: Sendable {
   /// Rich specification for the LLM, assembled from ProjectSnapshot.
   /// Contains project context, user query, and domain hints.
   public let specification: String
+  /// Extracted domain noun (e.g. "podcast"), used to reinforce naming in prompts.
+  public let domain: String?
 
   public enum TaskAction: String, Sendable {
     case create   // Generate new file
@@ -26,10 +28,11 @@ public struct ConcreteTask: Sendable {
     case bash     // Run shell command
   }
 
-  public init(action: TaskAction, target: String, specification: String) {
+  public init(action: TaskAction, target: String, specification: String, domain: String? = nil) {
     self.action = action
     self.target = target
     self.specification = specification
+    self.domain = domain
   }
 }
 
@@ -75,9 +78,9 @@ public struct TaskResolver: Sendable {
     adapter: any LLMAdapter
   ) async throws -> [ConcreteTask] {
     // Try deterministic recipe templates first
-    if let tasks = matchRecipe(
+    if let tasks = await matchRecipe(
       query: query, intent: intent, snapshot: snapshot,
-      index: index, explicitContext: explicitContext
+      index: index, explicitContext: explicitContext, adapter: adapter
     ) {
       return tasks
     }
@@ -97,16 +100,17 @@ public struct TaskResolver: Sendable {
     intent: AgentIntent,
     snapshot: ProjectSnapshot,
     index: [IndexEntry],
-    explicitContext: String
-  ) -> [ConcreteTask]? {
+    explicitContext: String,
+    adapter: (any LLMAdapter)? = nil
+  ) async -> [ConcreteTask]? {
     switch intent.taskType {
 
     // Recipe 0: Multi-file app scaffold — "build/create a X app"
     // Must check BEFORE single-file recipe since scaffold queries have no explicit targets.
     case "add" where Self.isAppScopeQuery(query),
          "build" where Self.isAppScopeQuery(query):
-      return buildAppScaffoldTasks(
-        query: query, snapshot: snapshot, explicitContext: explicitContext
+      return await buildAppScaffoldTasks(
+        query: query, snapshot: snapshot, explicitContext: explicitContext, adapter: adapter
       )
 
     // Recipe 1: Single file create — "add" with non-existent targets
@@ -463,30 +467,59 @@ public struct TaskResolver: Sendable {
 
   /// Extract the primary domain noun from an app creation query.
   /// "build a podcast app" → "podcast", "create a weather application" → "weather"
-  /// Also checks the project directory name as a fallback.
-  static func inferAppDomain(_ query: String, projectDirectory: String? = nil) -> String {
-    let lower = query.lowercased()
-    let patterns = [
-      #"(?:build|create|make)\s+(?:a|an)\s+(\w+)\s+(?:app|application|project)"#
-    ]
-    for pattern in patterns {
-      if let regex = try? NSRegularExpression(pattern: pattern),
-         let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
-         let range = Range(match.range(at: 1), in: lower) {
-        let domain = String(lower[range])
-        if domain != "new" && domain != "simple" && domain != "basic" && domain != "small" {
-          return domain
-        }
-      }
+  /// Uses regex as fast path, LLM as fallback, directory name as last resort.
+  static func inferAppDomain(
+    _ query: String,
+    projectDirectory: String? = nil,
+    adapter: (any LLMAdapter)? = nil
+  ) async -> String {
+    // Fast path: regex extraction
+    if let domain = inferAppDomainRegex(query) {
+      return domain
     }
     // Fallback: infer from project directory name (e.g. "JuncoPodcastApp" → "podcast")
     if let dir = projectDirectory {
       let dirName = (dir as NSString).lastPathComponent.lowercased()
-      // Strip common suffixes
       for suffix in ["app", "project", "sample", "demo"] {
         if dirName.hasSuffix(suffix) && dirName.count > suffix.count {
           let stripped = String(dirName.dropLast(suffix.count))
-          // Strip common prefixes like "junco"
+          for prefix in ["junco", "my", "the"] {
+            if stripped.hasPrefix(prefix) && stripped.count > prefix.count {
+              return String(stripped.dropFirst(prefix.count))
+            }
+          }
+          if !stripped.isEmpty { return stripped }
+        }
+      }
+    }
+    // LLM-based extraction (most accurate, costs one small structured call)
+    if let adapter {
+      if let domain = try? await adapter.generateStructured(
+        prompt: query,
+        system: "Extract the singular domain noun from this request. Examples: 'fetch podcasts' → podcast, 'track expenses' → expense, 'show weather' → weather.",
+        as: DomainExtraction.self,
+        options: LLMGenerationOptions(maximumResponseTokens: 50)
+      ) {
+        let cleaned = domain.domain.lowercased()
+          .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !cleaned.isEmpty && !stopWords.contains(cleaned) {
+          return cleaned
+        }
+      }
+    }
+    return "item"
+  }
+
+  /// Synchronous regex-only variant for tests and offline use.
+  static func inferAppDomain(_ query: String, projectDirectory: String? = nil) -> String {
+    if let domain = inferAppDomainRegex(query) {
+      return domain
+    }
+    if let dir = projectDirectory {
+      let dirName = (dir as NSString).lastPathComponent.lowercased()
+      for suffix in ["app", "project", "sample", "demo"] {
+        if dirName.hasSuffix(suffix) && dirName.count > suffix.count {
+          let stripped = String(dirName.dropLast(suffix.count))
           for prefix in ["junco", "my", "the"] {
             if stripped.hasPrefix(prefix) && stripped.count > prefix.count {
               return String(stripped.dropFirst(prefix.count))
@@ -499,15 +532,43 @@ public struct TaskResolver: Sendable {
     return "item"
   }
 
+  private static let stopWords: Set<String> = [
+    "new", "simple", "basic", "small", "a", "an", "the", "some", "all",
+    "this", "that", "data", "from", "with", "my", "item", "app", "application"
+  ]
+
+  /// Regex-based domain extraction — fast, no LLM call.
+  private static func inferAppDomainRegex(_ query: String) -> String? {
+    let lower = query.lowercased()
+    let patterns = [
+      #"(?:build|create|make)\s+(?:a|an)\s+(\w+)\s+(?:app|application|project)"#,
+      #"(?:service|view|feature|screen)\s+(?:to|for|that)\s+\w+\s+(\w+?)s?\b"#,
+      #"(?:fetch|load|display|show|search|manage|track|browse)\s+(\w+?)s?\b"#,
+      #"(\w+)\s+(?:api|feed|list|tracker|manager)\b"#
+    ]
+    for pattern in patterns {
+      if let regex = try? NSRegularExpression(pattern: pattern),
+         let match = regex.firstMatch(in: lower, range: NSRange(lower.startIndex..., in: lower)),
+         let range = Range(match.range(at: 1), in: lower) {
+        let domain = String(lower[range])
+        if !stopWords.contains(domain) {
+          return domain
+        }
+      }
+    }
+    return nil
+  }
+
   /// Generate ordered create tasks for an app scaffold.
   /// Order: Model → Service → ViewModel → View → App entry point.
   /// Only creates files that don't already exist.
   private func buildAppScaffoldTasks(
     query: String,
     snapshot: ProjectSnapshot,
-    explicitContext: String
-  ) -> [ConcreteTask] {
-    let domain = Self.inferAppDomain(query, projectDirectory: files.workingDirectory)
+    explicitContext: String,
+    adapter: (any LLMAdapter)? = nil
+  ) async -> [ConcreteTask] {
+    let domain = await Self.inferAppDomain(query, projectDirectory: files.workingDirectory, adapter: adapter)
     let cap = domain.prefix(1).uppercased() + domain.dropFirst()
 
     // Detect source directory from Package.swift target path or existing Swift files
@@ -546,7 +607,8 @@ public struct TaskResolver: Sendable {
     if !files.exists(modelTarget) {
       tasks.append(ConcreteTask(
         action: .create, target: modelTarget,
-        specification: "Create \(modelTarget).\n\nstruct \(cap): Codable, Identifiable with properties relevant to a \(domain). Include var id = UUID()."
+        specification: "Create \(modelTarget).\n\nstruct \(cap): Codable, Identifiable with properties relevant to a \(domain). Include var id = UUID().",
+        domain: domain
       ))
     }
 
@@ -555,7 +617,8 @@ public struct TaskResolver: Sendable {
     if !files.exists(serviceTarget) {
       tasks.append(ConcreteTask(
         action: .create, target: serviceTarget,
-        specification: "Create \(serviceTarget). actor \(cap)Service. Method: search\(cap)s(term: String) -> [\(cap)].\(urlHint) Params: term, media=\(domain)."
+        specification: "Create \(serviceTarget). actor \(cap)Service. Method: search\(cap)s(term: String) -> [\(cap)].\(urlHint) Params: term, media=\(domain).",
+        domain: domain
       ))
     }
 
@@ -564,7 +627,8 @@ public struct TaskResolver: Sendable {
     if !files.exists(vmTarget) {
       tasks.append(ConcreteTask(
         action: .create, target: vmTarget,
-        specification: "Create \(vmTarget).\n\n@Observable class \(cap)ViewModel with var \(domain)s: [\(cap)] = [] and var searchText: String = \"\". Method: func search() calls \(cap)Service().search\(cap)s(term: searchText) and assigns to \(domain)s."
+        specification: "Create \(vmTarget).\n\n@Observable class \(cap)ViewModel with var \(domain)s: [\(cap)] = [] and var searchText: String = \"\". Method: func search() calls \(cap)Service().search\(cap)s(term: searchText) and assigns to \(domain)s.",
+        domain: domain
       ))
     }
 
@@ -573,7 +637,8 @@ public struct TaskResolver: Sendable {
     if !files.exists(viewTarget) {
       tasks.append(ConcreteTask(
         action: .create, target: viewTarget,
-        specification: "Create \(viewTarget).\n\nSwiftUI View with @State var viewModel = \(cap)ViewModel(). List of viewModel.\(domain)s. Show each item's first two properties. Add .searchable(text: $viewModel.searchText) and .task { await viewModel.search() }. Navigation title: \"\(cap)s\"."
+        specification: "Create \(viewTarget).\n\nSwiftUI View with @State var viewModel = \(cap)ViewModel(). List of viewModel.\(domain)s. Show each item's first two properties. Add .searchable(text: $viewModel.searchText) and .task { await viewModel.search() }. Navigation title: \"\(cap)s\".",
+        domain: domain
       ))
     }
 
@@ -587,7 +652,8 @@ public struct TaskResolver: Sendable {
         ))
         tasks.append(ConcreteTask(
           action: .create, target: appTarget,
-          specification: appContent
+          specification: appContent,
+          domain: domain
         ))
       }
     }

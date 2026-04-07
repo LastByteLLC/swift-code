@@ -35,6 +35,14 @@ public enum StepOutcome: String, Sendable, Codable {
   case validationFailed
 }
 
+// MARK: - Domain Extraction
+
+@Generable
+public struct DomainExtraction: Codable, Sendable {
+  @Guide(description: "The singular domain noun, e.g. podcast, expense, weather")
+  public var domain: String
+}
+
 // MARK: - Mode Classification (dedicated small LLM call)
 
 @Generable

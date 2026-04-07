@@ -299,10 +299,12 @@ public actor Orchestrator {
       // Progress callback
       await callbacks.onProgress?(index + 1, totalTasks, "\(task.action.rawValue) \(task.target)")
 
-      // Stuck detection
-      if memory.observations.suffix(3).allSatisfy({ $0.outcome == .error }) && memory.observations.count >= 3 {
-        debug("GUARDRAIL: stuck — 3 consecutive errors, aborting")
-        memory.addError("Stuck: 3 consecutive task failures.")
+      // Stuck detection: abort when 50%+ of tasks have failed AND at least 3 errors
+      let errorCount = memory.observations.filter { $0.outcome == .error }.count
+      let totalCount = memory.observations.count
+      if errorCount >= 3 && errorCount * 2 >= totalCount {
+        debug("GUARDRAIL: stuck — \(errorCount)/\(totalCount) tasks failed, aborting")
+        memory.addError("Stuck: \(errorCount) of \(totalCount) tasks failed.")
         break
       }
 
@@ -370,10 +372,12 @@ public actor Orchestrator {
         }
       }
 
-      // Stuck detection: 3+ consecutive errors → abort
-      if memory.observations.suffix(3).allSatisfy({ $0.outcome == .error }) && memory.observations.count >= 3 {
-        debug("GUARDRAIL: stuck — 3 consecutive errors, aborting")
-        memory.addError("Stuck: 3 consecutive step failures. Try a different approach.")
+      // Stuck detection: abort when 50%+ of steps have failed AND at least 3 errors
+      let stepErrorCount = memory.observations.filter { $0.outcome == .error }.count
+      let stepTotalCount = memory.observations.count
+      if stepErrorCount >= 3 && stepErrorCount * 2 >= stepTotalCount {
+        debug("GUARDRAIL: stuck — \(stepErrorCount)/\(stepTotalCount) steps failed, aborting")
+        memory.addError("Stuck: \(stepErrorCount) of \(stepTotalCount) steps failed. Try a different approach.")
         break
       }
 
@@ -1522,38 +1526,52 @@ public actor Orchestrator {
               usedTemplate = true
             }
           } catch {
-            debug("Template retry also failed for \(target): \(error)")
+            debug("Template retry also failed for \(target): \(error) — falling through to Route 2")
+            // usedTemplate remains false → Route 2 will handle it
           }
         }
       }
       // Route 2: Plain generation with two-phase overflow fallback
       if !usedTemplate {
-        do {
-          var system = Prompts.createSystem(domain: domain)
-          if target.hasSuffix(".swift") {
-            let fileRole = MicroSkill.inferFileRole(target)
-            if let hint = skillLoader.skillHints(
-              domain: memory.intent?.domain ?? "swift",
-              taskType: memory.intent?.taskType ?? "add",
-              fileRole: fileRole, budget: 200) {
-              system += " " + hint
+        // Pre-flight overflow check: skip straight to two-phase if prompt is large
+        let system0 = Prompts.createSystem(domain: domain)
+        if target.hasSuffix(".swift"),
+           await TokenGuard.willOverflow(system: system0, prompt: task.specification, adapter: adapter) {
+          debug("Pre-flight: prompt too large for single-pass — using two-phase for \(target)")
+          let step = PlanStep(instruction: task.specification, tool: "create", target: target)
+          content = try await generateTwoPhase(step: step, memory: &memory)
+        } else {
+          do {
+            var system = system0
+            if let taskDomain = task.domain {
+              let cap = taskDomain.prefix(1).uppercased() + taskDomain.dropFirst()
+              system += " Use domain-specific names: \(cap), \(cap)Service, \(cap)ViewModel — never generic names like Item or MyApp."
             }
-          }
-          memory.trackCall(estimatedTokens: TokenBudget.execute.total)
-          content = try await adapter.generate(prompt: task.specification, system: system)
-          content = linter.cleanPlainTextOutput(content, filePath: target)
-          // Strip type declarations that duplicate existing project types
-          let existingNames = Set(
-            (projectSnapshot.models + projectSnapshot.services + projectSnapshot.views).map(\.name)
-          )
-          content = linter.removeDuplicateTypes(content, existingTypeNames: existingNames)
-        } catch let error as LLMError {
-          if case .contextOverflow = error, target.hasSuffix(".swift") {
-            debug("Context overflow on create — falling back to two-phase generation")
-            let step = PlanStep(instruction: task.specification, tool: "create", target: target)
-            content = try await generateTwoPhase(step: step, memory: &memory)
-          } else {
-            throw error
+            if target.hasSuffix(".swift") {
+              let fileRole = MicroSkill.inferFileRole(target)
+              if let hint = skillLoader.skillHints(
+                domain: memory.intent?.domain ?? "swift",
+                taskType: memory.intent?.taskType ?? "add",
+                fileRole: fileRole, budget: 200) {
+                system += " " + hint
+              }
+            }
+            memory.trackCall(estimatedTokens: TokenBudget.execute.total)
+            content = try await adapter.generate(prompt: task.specification, system: system)
+            content = linter.cleanPlainTextOutput(content, filePath: target)
+            // Strip type declarations that duplicate existing project types
+            let existingNames = Set(
+              (projectSnapshot.models + projectSnapshot.services + projectSnapshot.views).map(\.name)
+            )
+            content = linter.removeDuplicateTypes(content, existingTypeNames: existingNames)
+          } catch let error as LLMError {
+            if case .contextOverflow = error, target.hasSuffix(".swift") {
+              debug("Context overflow on create — falling back to two-phase generation")
+              let step = PlanStep(instruction: task.specification, tool: "create", target: target)
+              content = try await generateTwoPhase(step: step, memory: &memory)
+            } else {
+              throw error
+            }
           }
         }
       }
@@ -1566,6 +1584,9 @@ public actor Orchestrator {
         let cycles = isViewFile ? Config.maxCVFCyclesView : 2
         content = await compileVerifyFix(content: content, filePath: target, memory: &memory, maxCycles: cycles)
       }
+
+      // Format with swift-format (if available)
+      content = linter.format(content: content, filePath: target)
 
       // Validate and fix (syntax-level validation + linting)
       let validated = try await validateAndFix(content: content, filePath: target, memory: &memory)

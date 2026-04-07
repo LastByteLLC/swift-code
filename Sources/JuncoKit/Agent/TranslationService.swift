@@ -169,9 +169,28 @@ public actor TranslationService {
 
   private func detectLanguage(_ text: String) -> String? {
     guard text.count >= 8 else { return nil }
+
+    // Strip URLs and inline code — they confuse the recognizer
+    // (e.g. "/lang=en/" in a URL triggers Dutch detection)
+    var cleaned = text.replacingOccurrences(
+      of: #"https?://\S+"#, with: "", options: .regularExpression)
+    cleaned = cleaned.replacingOccurrences(
+      of: #"`[^`]+`"#, with: "", options: .regularExpression)
+    cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard cleaned.count >= 8 else { return nil }
+
     let recognizer = NLLanguageRecognizer()
-    recognizer.processString(text)
-    return recognizer.dominantLanguage?.rawValue
+    recognizer.processString(cleaned)
+    let hypotheses = recognizer.languageHypotheses(withMaximum: 1)
+    guard let (lang, confidence) = hypotheses.first,
+          confidence >= Config.languageDetectionConfidence else {
+      return nil
+    }
+
+    // If detected language matches the system language, no translation needed
+    let code = lang.rawValue
+    if code == systemLanguage { return nil }
+    return code
   }
 
   private func languageName(_ code: String) -> String {

@@ -26,7 +26,7 @@ struct TaskResolverTests {
   // MARK: - Recipe Matching
 
   @Test("simple create matches recipe")
-  func simpleCreate() throws {
+  func simpleCreate() async throws {
     let dir = try makeTempDir()
     defer { cleanup(dir) }
 
@@ -36,7 +36,7 @@ struct TaskResolverTests {
       mode: "build", targets: ["NewView.swift"]
     )
 
-    let tasks = resolver.matchRecipe(
+    let tasks = await resolver.matchRecipe(
       query: "Create a new SwiftUI view",
       intent: intent,
       snapshot: .empty,
@@ -51,7 +51,7 @@ struct TaskResolverTests {
   }
 
   @Test("fix matches recipe for existing file")
-  func fixExisting() throws {
+  func fixExisting() async throws {
     let dir = try makeTempDir(files: ["Bug.swift": "let x = 1"])
     defer { cleanup(dir) }
 
@@ -61,7 +61,7 @@ struct TaskResolverTests {
       mode: "build", targets: ["Bug.swift"]
     )
 
-    let tasks = resolver.matchRecipe(
+    let tasks = await resolver.matchRecipe(
       query: "Fix the bug",
       intent: intent,
       snapshot: .empty,
@@ -75,7 +75,7 @@ struct TaskResolverTests {
   }
 
   @Test("fix returns nil for non-existent file")
-  func fixNonExistent() throws {
+  func fixNonExistent() async throws {
     let dir = try makeTempDir()
     defer { cleanup(dir) }
 
@@ -85,7 +85,7 @@ struct TaskResolverTests {
       mode: "build", targets: ["Missing.swift"]
     )
 
-    let tasks = resolver.matchRecipe(
+    let tasks = await resolver.matchRecipe(
       query: "Fix the bug",
       intent: intent,
       snapshot: .empty,
@@ -97,7 +97,7 @@ struct TaskResolverTests {
   }
 
   @Test("test recipe creates test file")
-  func testRecipe() throws {
+  func testRecipe() async throws {
     let dir = try makeTempDir()
     defer { cleanup(dir) }
 
@@ -117,7 +117,7 @@ struct TaskResolverTests {
       keyFiles: [:]
     )
 
-    let tasks = resolver.matchRecipe(
+    let tasks = await resolver.matchRecipe(
       query: "Write tests for UserService",
       intent: intent,
       snapshot: snapshot,
@@ -133,7 +133,7 @@ struct TaskResolverTests {
   }
 
   @Test("explain recipe returns explain action")
-  func explainRecipe() throws {
+  func explainRecipe() async throws {
     let dir = try makeTempDir()
     defer { cleanup(dir) }
 
@@ -143,7 +143,7 @@ struct TaskResolverTests {
       mode: "answer", targets: []
     )
 
-    let tasks = resolver.matchRecipe(
+    let tasks = await resolver.matchRecipe(
       query: "Explain how the auth works",
       intent: intent,
       snapshot: .empty,
@@ -156,7 +156,7 @@ struct TaskResolverTests {
   }
 
   @Test("unknown task type returns nil")
-  func unknownType() throws {
+  func unknownType() async throws {
     let dir = try makeTempDir()
     defer { cleanup(dir) }
 
@@ -166,7 +166,7 @@ struct TaskResolverTests {
       mode: "build", targets: []
     )
 
-    let tasks = resolver.matchRecipe(
+    let tasks = await resolver.matchRecipe(
       query: "Deploy to production",
       intent: intent,
       snapshot: .empty,

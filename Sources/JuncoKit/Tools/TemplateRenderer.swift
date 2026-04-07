@@ -278,6 +278,64 @@ public struct TemplateRenderer: Sendable {
 
   public init() {}
 
+  // MARK: - Swift Toolchain Version
+
+  /// Detected swift-tools-version, cached for the session.
+  /// Runs `xcrun swift --version` once, parses "Swift version X.Y".
+  /// Falls back to Config.defaultSwiftToolsVersion if detection fails.
+  nonisolated(unsafe) private static var _cachedVersion: String?
+
+  public static var swiftToolsVersion: String {
+    if let cached = _cachedVersion { return cached }
+    let version = detectSwiftVersion()
+    _cachedVersion = version
+    return version
+  }
+
+  /// Check that `xcrun swift --version` succeeds. Returns false if
+  /// Xcode/Swift toolchain is not installed.
+  public static func isSwiftAvailable() -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    process.arguments = ["swift", "--version"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
+      process.waitUntilExit()
+      return process.terminationStatus == 0
+    } catch {
+      return false
+    }
+  }
+
+  private static func detectSwiftVersion() -> String {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+    process.arguments = ["swift", "--version"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    process.standardError = FileHandle.nullDevice
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+    } catch {
+      return Config.defaultSwiftToolsVersion
+    }
+
+    guard process.terminationStatus == 0 else {
+      return Config.defaultSwiftToolsVersion
+    }
+
+    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    // Parse "Swift version 6.3" or "Apple Swift version 6.3"
+    if let match = output.firstMatch(of: /Swift version (\d+\.\d+)/) {
+      return String(match.1)
+    }
+    return Config.defaultSwiftToolsVersion
+  }
+
   /// Detect if a file path should use template-based generation.
   public func shouldUseTemplate(filePath: String) -> Bool {
     templateSystemPrompt(for: filePath) != nil
@@ -598,7 +656,7 @@ public struct TemplateRenderer: Sendable {
     }
 
     return """
-    // swift-tools-version: 6.0
+    // swift-tools-version: \(Self.swiftToolsVersion)
     import PackageDescription
 
     let package = Package(

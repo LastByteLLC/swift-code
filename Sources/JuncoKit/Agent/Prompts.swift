@@ -130,7 +130,7 @@ public enum Prompts {
     let base = "Output only the file content. No markdown fences, no explanation."
     switch domain.kind {
     case .swift:
-      return "\(base) Write complete, compilable Swift. Use proper imports. Follow Swift naming conventions. \(domain.promptHint)"
+      return "\(base) Write complete, compilable Swift. Use proper imports. Follow Swift naming conventions. Swift version: \(TemplateRenderer.swiftToolsVersion). \(domain.promptHint)"
     case .general:
       return "\(base) \(domain.promptHint)"
     }

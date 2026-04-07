@@ -27,6 +27,73 @@ public struct PostGenerationLinter: Sendable {
     return result
   }
 
+  /// Apply swift-format to generated Swift code. Call AFTER lint() and before validation.
+  /// Returns formatted content, or original if swift-format is unavailable or fails.
+  public func format(content: String, filePath: String) -> String {
+    guard filePath.hasSuffix(".swift") else { return content }
+    return formatWithSwiftFormat(content, filePath: filePath)
+  }
+
+  // MARK: - swift-format
+
+  /// Cached check for swift-format availability.
+  nonisolated(unsafe) private static var _swiftFormatAvailable: Bool?
+
+  private static var swiftFormatAvailable: Bool {
+    if let cached = _swiftFormatAvailable { return cached }
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["swift-format", "--version"]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    let available: Bool
+    do {
+      try process.run()
+      process.waitUntilExit()
+      available = process.terminationStatus == 0
+    } catch {
+      available = false
+    }
+    _swiftFormatAvailable = available
+    return available
+  }
+
+  /// Run swift-format on generated Swift code. Returns formatted content,
+  /// or original content if swift-format is unavailable or fails.
+  private func formatWithSwiftFormat(_ content: String, filePath: String) -> String {
+    guard Self.swiftFormatAvailable else { return content }
+
+    let tmp = NSTemporaryDirectory() + "junco-fmt-\(UUID().uuidString).swift"
+    defer { try? FileManager.default.removeItem(atPath: tmp) }
+
+    do {
+      try content.write(toFile: tmp, atomically: true, encoding: .utf8)
+    } catch {
+      return content
+    }
+
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+    process.arguments = ["swift-format", "format", "--in-place", tmp]
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+    } catch {
+      return content
+    }
+
+    guard process.terminationStatus == 0 else { return content }
+
+    do {
+      return try String(contentsOfFile: tmp, encoding: .utf8)
+    } catch {
+      return content
+    }
+  }
+
   // MARK: - Rules
 
   /// Transform ObservableObject conformance to @Observable class.

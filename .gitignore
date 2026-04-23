@@ -29,3 +29,5 @@ Training/stats.txt
 # Legacy
 .transcripts/
 .tasks/
+*.lock
+/fixtures

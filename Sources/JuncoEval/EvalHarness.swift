@@ -40,6 +40,19 @@ struct EvalResult: Sendable {
   let durationSeconds: Double
   let qualityCriteria: [String]
   let modeCorrect: Bool?       // nil if no expected mode
+  /// Cosine similarity (0…1) between answer and canonical reference, or nil if no reference defined.
+  let referenceSimilarity: Double?
+}
+
+// MARK: - Splits
+
+/// Eval-set membership for each case. Default is "search" (the primary iteration set).
+/// Unlisted cases fall into the default. Overrides live in EvalHarness.splits.
+enum EvalSplit: String {
+  case canary
+  case search
+  case holdout
+  case holdoutFinal = "holdout-final"
 }
 
 // MARK: - Harness
@@ -47,6 +60,50 @@ struct EvalResult: Sendable {
 struct EvalHarness {
   let workingDirectory: String
   let verbose: Bool
+
+  /// Canonical-answer scorer, populated once from fixtures/reference_answers.json.
+  var referenceScorer: ReferenceScorer { ReferenceScorer(workingDirectory: workingDirectory) }
+
+  // MARK: - Splits
+
+  /// Cases explicitly tagged to a non-default split. Others default to `.search`.
+  /// Canary: ~4 fast/trivial gates that must pass every iteration.
+  /// Holdout: reserved for candidate promotion; not used during iteration.
+  /// Holdout-final: scored once at end-of-experiment, never during iteration.
+  static let splits: [String: EvalSplit] = [
+    // Canary (4) — fast gate
+    "search-mode-enum": .canary,
+    "search-file-count": .canary,
+    "search-identifier-orchestrator": .canary,
+    "explain-pipeline": .canary,
+
+    // Holdout (10) — promotion check
+    "plan-add-feature": .holdout,
+    "search-static-property": .holdout,
+    "search-init-declarations": .holdout,
+    "search-enum-cases": .holdout,
+    "search-depends-on-config": .holdout,
+    "search-depends-on-safeshell": .holdout,
+    "search-cross-file-usage": .holdout,
+    "search-adversarial-build": .holdout,
+    "search-adversarial-fix": .holdout,
+    "search-test-suites": .holdout,
+
+    // Holdout-final (9) — reserved, scored once
+    "search-entry-point": .holdoutFinal,
+    "search-error-types": .holdoutFinal,
+    "search-typealias": .holdoutFinal,
+    "search-tree-sitter-integration": .holdoutFinal,
+    "search-extension-conformance": .holdoutFinal,
+    "search-symbol-index-users": .holdoutFinal,
+    "search-afm-adapter-callers": .holdoutFinal,
+    "search-pipeline-callbacks": .holdoutFinal,
+    "fix-injected-typo": .holdoutFinal
+  ]
+
+  static func split(for name: String) -> EvalSplit {
+    splits[name] ?? .search
+  }
 
   // MARK: - Test Cases
 
@@ -674,31 +731,39 @@ struct EvalHarness {
   func run(
     caseFilter: String? = nil,
     includeDestructive: Bool = false,
-    reportPath: String? = nil
+    reportPath: String? = nil,
+    splitFilter: EvalSplit? = nil
   ) async -> String {
     let adapter = AFMAdapter()
-    // Load LoRA adapter if available
-    let adapterPaths = [
-      URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".junco/models/junco_coding_v4.fmadapter"),
-      URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".junco/models/junco_coding.fmadapter"),
-      URL(fileURLWithPath: "Training/lora/export/junco_coding.fmadapter")
-    ]
-    for path in adapterPaths {
-      if FileManager.default.fileExists(atPath: path.appendingPathComponent("adapter_weights.bin").path) {
-        await adapter.loadAdapter(from: path)
-        if await adapter.hasAdapter {
-          print("LoRA adapter loaded: \(path.lastPathComponent)")
-          break
+    // LoRA gated off by default during meta-harness build.
+    // Reason: APFS metadata leak (~100MB/call, Apple forum 823001). Plan: ultrathink-read-the-meta-harness-functional-wigderson.md.
+    // To re-enable: set env var JUNCO_LORA_ENABLED=1 before launching.
+    let loraEnabled = ProcessInfo.processInfo.environment["JUNCO_LORA_ENABLED"] == "1"
+    if loraEnabled {
+      let adapterPaths = [
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".junco/models/junco_coding_v4.fmadapter"),
+        URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent(".junco/models/junco_coding.fmadapter"),
+        URL(fileURLWithPath: "Training/lora/export/junco_coding.fmadapter")
+      ]
+      for path in adapterPaths {
+        if FileManager.default.fileExists(atPath: path.appendingPathComponent("adapter_weights.bin").path) {
+          await adapter.loadAdapter(from: path)
+          if await adapter.hasAdapter {
+            print("LoRA adapter loaded: \(path.lastPathComponent)")
+            break
+          }
         }
       }
-    }
-    if await !adapter.hasAdapter {
-      await adapter.loadAdapter()  // Try registered name fallback
-      if await adapter.hasAdapter {
-        print("LoRA adapter loaded (registered name)")
-      } else {
-        print("⚠ No LoRA adapter — running with base model")
+      if await !adapter.hasAdapter {
+        await adapter.loadAdapter()  // Try registered name fallback
+        if await adapter.hasAdapter {
+          print("LoRA adapter loaded (registered name)")
+        } else {
+          print("⚠ No LoRA adapter — running with base model")
+        }
       }
+    } else {
+      print("⚠ LoRA disabled (meta-harness build) — running with base model")
     }
 
     var cases = Self.nonDestructiveCases
@@ -709,8 +774,18 @@ struct EvalHarness {
     if let filter = caseFilter {
       cases = cases.filter { $0.name.contains(filter) }
     }
+    if let split = splitFilter {
+      cases = cases.filter { Self.split(for: $0.name) == split }
+    }
 
     print("Junco Self-Evaluation: \(cases.count) case(s)\n")
+
+    let traceDir = ProcessInfo.processInfo.environment["JUNCO_TRACE_DIR"]
+    let effectiveAdapter: any LLMAdapter = traceDir != nil ? TracingLLMAdapter(wrapping: adapter) : adapter
+    if let traceDir {
+      try? FileManager.default.createDirectory(atPath: traceDir, withIntermediateDirectories: true)
+      print("Trace dir: \(traceDir)")
+    }
 
     var results: [EvalResult] = []
 
@@ -718,11 +793,16 @@ struct EvalHarness {
       print("[\(i + 1)/\(cases.count)] \(evalCase.name)...", terminator: "")
       fflush(stdout)
 
-      let result: EvalResult
-      if evalCase.destructive {
-        result = await runDestructive(evalCase, adapter: adapter)
-      } else {
-        result = await runCase(evalCase, adapter: adapter)
+      let sink: JSONLTraceSink? = traceDir.flatMap {
+        try? JSONLTraceSink(url: URL(fileURLWithPath: $0).appendingPathComponent("\(evalCase.name).trace.jsonl"))
+      }
+
+      let result: EvalResult = await TraceContext.$sink.withValue(sink) {
+        if evalCase.destructive {
+          return await runDestructive(evalCase, adapter: effectiveAdapter)
+        } else {
+          return await runCase(evalCase, adapter: effectiveAdapter)
+        }
       }
 
       results.append(result)
@@ -743,12 +823,104 @@ struct EvalHarness {
     try? report.write(toFile: outputPath, atomically: true, encoding: .utf8)
     print("\nReport written to \(outputPath)")
 
+    // Emit structured summary JSON for meta-harness consumption
+    if let summaryPath = ProcessInfo.processInfo.environment["JUNCO_SUMMARY_JSON"] {
+      writeSummaryJSON(results: results, path: summaryPath, splitFilter: splitFilter)
+    }
+
     return report
+  }
+
+  /// Emit per-case + aggregate JSON for programmatic consumption (e.g. junco-meta).
+  private func writeSummaryJSON(results: [EvalResult], path: String, splitFilter: EvalSplit?) {
+    struct CaseSummary: Encodable {
+      let name: String
+      let split: String
+      let mode: String
+      let modeCorrect: Bool?
+      let succeeded: Bool
+      let llmCalls: Int
+      let tokensUsed: Int
+      let durationSeconds: Double
+      let filesModified: [String]
+      let answerPreview: String
+      let errors: [String]
+      let referenceSimilarity: Double?
+    }
+    struct Summary: Encodable {
+      let splitFilter: String?
+      let caseCount: Int
+      let succeeded: Int
+      let failed: Int
+      let successRate: Double
+      let modeCorrectCount: Int
+      let modeExpectedCount: Int
+      let totalLlmCalls: Int
+      let totalTokens: Int
+      let totalDurationSec: Double
+      let meanDurationSec: Double
+      let medianDurationSec: Double
+      let p90DurationSec: Double
+      let referenceScoredCount: Int
+      let meanReferenceSimilarity: Double?
+      let minReferenceSimilarity: Double?
+      let cases: [CaseSummary]
+    }
+    let perCase = results.map {
+      CaseSummary(
+        name: $0.caseName,
+        split: Self.split(for: $0.caseName).rawValue,
+        mode: $0.mode.rawValue,
+        modeCorrect: $0.modeCorrect,
+        succeeded: $0.succeeded,
+        llmCalls: $0.llmCalls,
+        tokensUsed: $0.tokensUsed,
+        durationSeconds: $0.durationSeconds,
+        filesModified: $0.filesModified,
+        answerPreview: String($0.answer.prefix(400)),
+        errors: $0.errors,
+        referenceSimilarity: $0.referenceSimilarity
+      )
+    }
+    let durations = results.map { $0.durationSeconds }
+    let sorted = durations.sorted()
+    let median = sorted.isEmpty ? 0 : sorted[sorted.count / 2]
+    let p90 = sorted.isEmpty ? 0 : sorted[min(sorted.count - 1, Int(Double(sorted.count) * 0.9))]
+    let expected = results.filter { $0.modeCorrect != nil }
+    let refSims = results.compactMap { $0.referenceSimilarity }
+    let meanRef = refSims.isEmpty ? nil : refSims.reduce(0, +) / Double(refSims.count)
+    let minRef = refSims.min()
+    let summary = Summary(
+      splitFilter: splitFilter?.rawValue,
+      caseCount: results.count,
+      succeeded: results.filter { $0.succeeded }.count,
+      failed: results.filter { !$0.succeeded }.count,
+      successRate: results.isEmpty ? 0 : Double(results.filter { $0.succeeded }.count) / Double(results.count),
+      modeCorrectCount: expected.filter { $0.modeCorrect == true }.count,
+      modeExpectedCount: expected.count,
+      totalLlmCalls: results.map(\.llmCalls).reduce(0, +),
+      totalTokens: results.map(\.tokensUsed).reduce(0, +),
+      totalDurationSec: durations.reduce(0, +),
+      meanDurationSec: durations.isEmpty ? 0 : durations.reduce(0, +) / Double(durations.count),
+      medianDurationSec: median,
+      p90DurationSec: p90,
+      referenceScoredCount: refSims.count,
+      meanReferenceSimilarity: meanRef,
+      minReferenceSimilarity: minRef,
+      cases: perCase
+    )
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+    guard let data = try? encoder.encode(summary) else { return }
+    let dirPath = (path as NSString).deletingLastPathComponent
+    try? FileManager.default.createDirectory(atPath: dirPath, withIntermediateDirectories: true)
+    try? data.write(to: URL(fileURLWithPath: path))
+    print("Summary JSON: \(path)")
   }
 
   // MARK: - Run Single Case
 
-  private func runCase(_ evalCase: EvalCase, adapter: AFMAdapter) async -> EvalResult {
+  private func runCase(_ evalCase: EvalCase, adapter: any LLMAdapter) async -> EvalResult {
     let orchestrator = Orchestrator(adapter: adapter, workingDirectory: workingDirectory)
     if verbose { await orchestrator.setVerbose(true) }
 
@@ -783,6 +955,7 @@ struct EvalHarness {
         (instruction: $0.instruction, tool: $0.tool, target: $0.target)
       } ?? []
 
+      let similarity = referenceScorer.score(caseName: evalCase.name, answer: result.reflection.insight)
       return EvalResult(
         caseName: evalCase.name,
         query: evalCase.query,
@@ -797,7 +970,8 @@ struct EvalHarness {
         filesModified: Array(result.memory.touchedFiles),
         durationSeconds: duration,
         qualityCriteria: evalCase.qualityCriteria,
-        modeCorrect: evalCase.expectedMode.map { $0 == capturedMode }
+        modeCorrect: evalCase.expectedMode.map { $0 == capturedMode },
+        referenceSimilarity: similarity
       )
     } catch {
       let capturedMode = modeLock.withLock { $0 }
@@ -809,14 +983,15 @@ struct EvalHarness {
         succeeded: false, llmCalls: 0, tokensUsed: 0,
         filesModified: [], durationSeconds: Date().timeIntervalSince(start),
         qualityCriteria: evalCase.qualityCriteria,
-        modeCorrect: evalCase.expectedMode.map { $0 == capturedMode }
+        modeCorrect: evalCase.expectedMode.map { $0 == capturedMode },
+        referenceSimilarity: nil
       )
     }
   }
 
   // MARK: - Destructive Test (Git Checkpoint + Rewind)
 
-  private func runDestructive(_ evalCase: EvalCase, adapter: AFMAdapter) async -> EvalResult {
+  private func runDestructive(_ evalCase: EvalCase, adapter: any LLMAdapter) async -> EvalResult {
     let shell = SafeShell(workingDirectory: workingDirectory)
 
     // Checkpoint: stash any existing changes

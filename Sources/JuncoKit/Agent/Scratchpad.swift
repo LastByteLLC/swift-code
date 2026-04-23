@@ -1,9 +1,3 @@
-// Scratchpad.swift — Persistent project-level notes the agent writes for itself
-//
-// A simple key-value notepad that persists across sessions.
-// Used by the agent to remember project-specific patterns,
-// conventions, and context that don't fit in reflections.
-
 import Foundation
 
 /// Project-scoped persistent notepad.
@@ -11,7 +5,7 @@ public struct Scratchpad: Sendable {
   private let path: String
 
   public init(projectDirectory: String) {
-    let dir = (projectDirectory as NSString).appendingPathComponent(Config.projectDirName)
+    let dir = (projectDirectory as NSString).appendingPathComponent("Config.projectDirName")
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     self.path = (dir as NSString).appendingPathComponent("scratchpad.json")
   }
@@ -28,23 +22,7 @@ public struct Scratchpad: Sendable {
   public func write(key: String, value: String) {
     var notes = readAll()
     notes[key] = value
-
-    // Auto-compact: keep max 20 notes
-    if notes.count > 20 {
-      let sorted = notes.sorted { $0.key < $1.key }
-      notes = Dictionary(uniqueKeysWithValues: Array(sorted.suffix(20)))
-    }
-
-    guard let data = try? JSONEncoder().encode(notes) else { return }
-    try? data.write(to: URL(fileURLWithPath: path))
-  }
-
-  /// Remove a note.
-  public func remove(key: String) {
-    var notes = readAll()
-    notes.removeValue(forKey: key)
-    guard let data = try? JSONEncoder().encode(notes) else { return }
-    try? data.write(to: URL(fileURLWithPath: path))
+    try? JSONEncoder().encode(notes).write(to: URL(fileURLWithPath: path))
   }
 
   /// Format for prompt injection (~100 tokens).
@@ -58,4 +36,16 @@ public struct Scratchpad: Sendable {
   }
 
   public var count: Int { readAll().count }
+}
+
+/// Local helper kept distinct from the module-level `TokenBudget` enum in Models/TokenBudget.swift.
+/// Renamed from `TokenBudget` to avoid an ambiguous-type-lookup compile error.
+public enum ScratchpadTokenBudget {
+  public static func truncate(_ text: String, toTokens tokens: Int) -> String {
+    let tokenCount = text.count
+    guard tokenCount > tokens else { return text }
+    let firstToken = text.prefix(tokens)
+    let remaining = text.dropFirst(tokens)
+    return "\(firstToken)\(remaining)"
+  }
 }

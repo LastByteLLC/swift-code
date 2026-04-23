@@ -34,8 +34,10 @@ struct TokenBudgetTests {
     #expect(result.contains("truncated"))
   }
 
-  @Test("all stage budgets fit within context window")
-  func budgetsFit() {
+  @Test("all stage budgets fit within a 4K context window")
+  func budgetsFit() async {
+    // Default stage budgets were sized for AFM's historical 4K window;
+    // they must remain conservative so they fit any adapter's contextSize.
     let stages: [StageBudget] = [
       TokenBudget.classify,
       TokenBudget.plan,
@@ -43,9 +45,10 @@ struct TokenBudgetTests {
       TokenBudget.observe
     ]
 
+    let window = await MockAdapter().contextSize
     for stage in stages {
-      #expect(stage.total <= TokenBudget.defaultContextWindow,
-        "Stage budget \(stage.total) exceeds default context window \(TokenBudget.defaultContextWindow)")
+      #expect(stage.total <= window,
+        "Stage budget \(stage.total) exceeds mock context window \(window)")
     }
   }
 

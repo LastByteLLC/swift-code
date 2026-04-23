@@ -29,12 +29,19 @@ enum JuncoEval {
       let caseFilter = parseArg("--case")
       let includeDestructive = CommandLine.arguments.contains("--destructive")
       let reportPath = parseArg("--report")
+      let splitRaw = parseArg("--split")
+      let splitFilter: EvalSplit? = splitRaw.flatMap { EvalSplit(rawValue: $0) }
+      if splitRaw != nil && splitFilter == nil {
+        FileHandle.standardError.write(Data("Unknown --split value. Use: canary|search|holdout|holdout-final\n".utf8))
+        Foundation.exit(2)
+      }
 
       let harness = EvalHarness(workingDirectory: baseDir, verbose: verbose)
       let report = await harness.run(
         caseFilter: caseFilter,
         includeDestructive: includeDestructive,
-        reportPath: reportPath
+        reportPath: reportPath,
+        splitFilter: splitFilter
       )
 
       if verbose {

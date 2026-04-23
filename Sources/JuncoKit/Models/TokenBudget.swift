@@ -1,22 +1,28 @@
 // TokenBudget.swift — Token estimation and budget management
 //
 // Per TN3193: "roughly three to four characters in Latin alphabet languages"
-// Context window size derived from the active LLMAdapter at runtime.
+// Context window size is derived from the active LLMAdapter at runtime
+// (adapter.contextSize), never hardcoded.
 
 import Foundation
 
 /// Token budget constants for each pipeline stage.
 public enum TokenBudget {
 
-  /// Default context window size for backends that don't report their own.
-  public static let defaultContextWindow = 4096
-
   // MARK: - Per-stage budgets
 
-  public static let classify = StageBudget(system: 100, context: 200, prompt: 100, generation: 400)
-  public static let plan = StageBudget(system: 150, context: 500, prompt: 150, generation: 800)
-  public static let execute = StageBudget(system: 150, context: 800, prompt: 200, generation: 1500)
-  public static let observe = StageBudget(system: 80, context: 600, prompt: 80, generation: 300)
+  public static var classify: StageBudget {
+    StageBudget.resolve(MetaConfig.shared.classifyBudget, default: StageBudget(system: 100, context: 200, prompt: 100, generation: 400))
+  }
+  public static var plan: StageBudget {
+    StageBudget.resolve(MetaConfig.shared.planBudget, default: StageBudget(system: 150, context: 500, prompt: 150, generation: 800))
+  }
+  public static var execute: StageBudget {
+    StageBudget.resolve(MetaConfig.shared.executeBudget, default: StageBudget(system: 150, context: 800, prompt: 200, generation: 1500))
+  }
+  public static var observe: StageBudget {
+    StageBudget.resolve(MetaConfig.shared.observeBudget, default: StageBudget(system: 80, context: 600, prompt: 80, generation: 300))
+  }
 
   // MARK: - Estimation
 
@@ -111,6 +117,17 @@ public struct StageBudget: Sendable {
     self.context = context
     self.prompt = prompt
     self.generation = generation
+  }
+
+  /// Merge a per-field override onto a default budget. Nil fields inherit from default.
+  static func resolve(_ override: MetaConfig.StageBudgetOverride?, default base: StageBudget) -> StageBudget {
+    guard let o = override else { return base }
+    return StageBudget(
+      system: o.system ?? base.system,
+      context: o.context ?? base.context,
+      prompt: o.prompt ?? base.prompt,
+      generation: o.generation ?? base.generation
+    )
   }
 }
 

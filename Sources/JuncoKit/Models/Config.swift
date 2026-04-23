@@ -1,7 +1,8 @@
 // Config.swift — Consolidated static configuration
 //
 // All tunable thresholds and limits in one place.
-// No magic numbers scattered across the codebase.
+// Each knob reads through MetaConfig.shared to support runtime overrides via
+// $META_CONFIG_JSON. Default values preserved when the overlay is absent.
 
 import Foundation
 
@@ -10,11 +11,9 @@ public enum Config {
 
   // MARK: - Token Budgets
 
-  /// AFM context window size in tokens.
-  public static let contextWindow = 4096
-
   /// Approximate characters per token (conservative for code with short tokens).
-  public static let charsPerToken = 3
+  /// Used only when `adapter.contextSize` / `adapter.countTokens` is unavailable.
+  public static var charsPerToken: Int { MetaConfig.shared.charsPerToken ?? 3 }
 
   // MARK: - Session
 
@@ -22,81 +21,79 @@ public enum Config {
   public static let pasteThreshold = 500
 
   /// Maximum number of turns to keep in multi-turn context.
-  public static let maxTurnHistory = 5
+  public static var maxTurnHistory: Int { MetaConfig.shared.maxTurnHistory ?? 5 }
 
   /// Maximum number of observations kept in working memory.
-  public static let maxObservations = 5
+  public static var maxObservations: Int { MetaConfig.shared.maxObservations ?? 5 }
 
   /// Maximum number of errors kept in working memory.
-  public static let maxErrors = 5
+  public static var maxErrors: Int { MetaConfig.shared.maxErrors ?? 5 }
 
   // MARK: - Tools
 
   /// Default bash command timeout in seconds.
-  public static let bashTimeout: TimeInterval = 30
+  public static var bashTimeout: TimeInterval { MetaConfig.shared.bashTimeout ?? 30 }
 
   /// Maximum retries when code validation (Swift) fails.
-  public static let maxValidationRetries = 2
+  public static var maxValidationRetries: Int { MetaConfig.shared.maxValidationRetries ?? 2 }
 
   /// Maximum CVF (compile-verify-fix) cycles for view files (SwiftUI bodies are harder).
-  public static let maxCVFCyclesView = 3
+  public static var maxCVFCyclesView: Int { MetaConfig.shared.maxCVFCyclesView ?? 3 }
 
   /// Number of candidates to generate for multi-sample compile-select.
-  public static let candidateCount = 3
+  public static var candidateCount: Int { MetaConfig.shared.candidateCount ?? 3 }
 
   /// Temperature for candidate generation (higher = more diverse candidates).
-  public static let candidateTemperature = 0.8
+  public static var candidateTemperature: Double { MetaConfig.shared.candidateTemperature ?? 0.8 }
 
   /// Whether two-phase generation (skeleton → fill) is used for complex Swift files.
-  /// When true, view/viewmodel/service files use two-phase; simple models use single-pass.
-  /// Also used as overflow fallback for any Swift file whose prompt exceeds the context window.
-  public static let twoPhaseDefault = true
+  public static var twoPhaseDefault: Bool { MetaConfig.shared.twoPhaseDefault ?? true }
 
   /// Whether to sandbox bash commands via sandbox-exec.
-  public static let sandboxEnabled = true
+  public static var sandboxEnabled: Bool { MetaConfig.shared.sandboxEnabled ?? true }
 
   /// Maximum tokens for tool output before truncation.
-  public static let toolOutputMaxTokens = 400
+  public static var toolOutputMaxTokens: Int { MetaConfig.shared.toolOutputMaxTokens ?? 400 }
 
   /// Maximum tokens for file reads in execute stage.
-  public static let fileReadMaxTokens = 800
+  public static var fileReadMaxTokens: Int { MetaConfig.shared.fileReadMaxTokens ?? 800 }
 
   /// Maximum tokens for file reads in plan context.
-  public static let planFileReadMaxTokens = 200
+  public static var planFileReadMaxTokens: Int { MetaConfig.shared.planFileReadMaxTokens ?? 200 }
 
   // MARK: - RAG
 
   /// Maximum files to index per project.
-  /// Scales: <100 files = all, 100-500 = Sources fully + Tests summary, 500+ = smart selection.
-  public static let maxIndexFiles = 500
+  public static var maxIndexFiles: Int { MetaConfig.shared.maxIndexFiles ?? 500 }
 
   /// Maximum directory depth for file scanning.
-  public static let maxScanDepth = 6
+  public static var maxScanDepth: Int { MetaConfig.shared.maxScanDepth ?? 6 }
 
   /// Maximum files in quick listing.
-  public static let maxListFiles = 200
+  public static var maxListFiles: Int { MetaConfig.shared.maxListFiles ?? 200 }
 
   // MARK: - Reflections
 
   /// Maximum reflections before auto-compaction (JSONL store).
-  public static let maxReflections = 100
+  public static var maxReflections: Int { MetaConfig.shared.maxReflections ?? 100 }
 
   /// Minimum confidence for ML classifier before falling back to LLM.
-  public static let mlClassifierConfidence = 0.7
+  public static var mlClassifierConfidence: Double { MetaConfig.shared.mlClassifierConfidence ?? 0.7 }
 
   // MARK: - Skills
 
   /// Maximum token budget for skill hints injected into prompts.
-  public static let skillHintBudget = 200
+  public static var skillHintBudget: Int { MetaConfig.shared.skillHintBudget ?? 200 }
 
   /// Safety margin as percentage of context window.
-  /// Reserved as buffer for token estimation errors. 5% ≈ 200 tokens at 4K.
-  public static let tokenSafetyMarginPercent = 5
+  public static var tokenSafetyMarginPercent: Int { MetaConfig.shared.tokenSafetyMarginPercent ?? 5 }
 
   // MARK: - Language Detection
 
   /// Minimum confidence from NLLanguageRecognizer to treat detection as valid.
-  public static let languageDetectionConfidence = 0.85
+  public static var languageDetectionConfidence: Double {
+    MetaConfig.shared.languageDetectionConfidence ?? 0.85
+  }
 
   // MARK: - Swift Toolchain
 

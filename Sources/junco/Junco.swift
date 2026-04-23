@@ -95,6 +95,11 @@ struct Junco: AsyncParsableCommand {
 
   /// Load LoRA adapter for AFM backend (extracted from old startup flow).
   private func loadLoRAIfNeeded(afm: AFMAdapter, cwd: String) async {
+    // LoRA gated off by default during meta-harness build.
+    // Reason: APFS metadata leak (~100MB/call, Apple forum 823001) makes repeated eval loads infeasible.
+    // Plan: ~/.claude/plans/ultrathink-read-the-meta-harness-functional-wigderson.md
+    // To re-enable: set env var JUNCO_LORA_ENABLED=1 before launching.
+    guard ProcessInfo.processInfo.environment["JUNCO_LORA_ENABLED"] == "1" else { return }
     guard !noAdapter else { return }
 
     if let path = adapter {

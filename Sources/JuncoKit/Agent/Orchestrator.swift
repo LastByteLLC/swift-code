@@ -1,3 +1,4 @@
+// swiftlint:disable file_length
 // Orchestrator.swift — Main agent pipeline
 //
 // classify → plan → execute (2-phase) → reflect
@@ -139,6 +140,12 @@ public actor Orchestrator {
     lastBuildResult = nil
     activeCallbacks = callbacks
 
+    var rsp = TraceEvent.Payload()
+    rsp.userPrompt = query
+    rsp.notes = "refs=\(referencedFiles.count) override=\(modeOverride.map { $0.rawValue } ?? "nil")"
+    await TraceContext.emit(kind: .runStart, stage: "root", payload: rsp)
+    let runStartNs = DispatchTime.now().uptimeNanoseconds
+
     // Conversational short-circuit
     if let directResponse = handleConversational(query) {
       return RunResult(memory: memory, reflection: AgentReflection(
@@ -223,7 +230,12 @@ public actor Orchestrator {
     }
 
     // Classify
+    await TraceContext.emit(kind: .stageStart, stage: "classify")
+    let classifyStartNs = DispatchTime.now().uptimeNanoseconds
     let intent = try await classify(query: query, memory: &memory, explicitTargets: referencedFiles)
+    let classifyMs = Double(DispatchTime.now().uptimeNanoseconds - classifyStartNs) / 1_000_000.0
+    await TraceContext.emitStageEnd("classify", durationMs: classifyMs,
+      notes: "mode=\(intent.agentMode.rawValue) domain=\(intent.domain) type=\(intent.taskType) complexity=\(intent.complexity)")
     memory.intent = intent
 
     // Mode resolution: user override > post-classification check > LLM classification
@@ -254,12 +266,31 @@ public actor Orchestrator {
     }
 
     // Mode dispatch — build modifies files, answer reads + responds
-    switch memory.mode {
-    case .build:
-      return try await runBuild(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
-    case .answer:
-      return try await runAnswer(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+    let dispatchStage = memory.mode == .build ? "build" : "answer"
+    await TraceContext.emit(kind: .stageStart, stage: dispatchStage)
+    let dispatchStartNs = DispatchTime.now().uptimeNanoseconds
+    let result: RunResult
+    do {
+      switch memory.mode {
+      case .build:
+        result = try await runBuild(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+      case .answer:
+        result = try await runAnswer(memory: &memory, explicitContext: explicitContext, callbacks: callbacks)
+      }
+    } catch {
+      let ms = Double(DispatchTime.now().uptimeNanoseconds - dispatchStartNs) / 1_000_000.0
+      await TraceContext.emitStageEnd(dispatchStage, durationMs: ms, error: error)
+      let runMs = Double(DispatchTime.now().uptimeNanoseconds - runStartNs) / 1_000_000.0
+      await TraceContext.emitStageEnd("root", durationMs: runMs, error: error)
+      throw error
     }
+    let dispatchMs = Double(DispatchTime.now().uptimeNanoseconds - dispatchStartNs) / 1_000_000.0
+    let summary = "llmCalls=\(memory.llmCalls) tokens=\(memory.totalTokensUsed) succeeded=\(result.reflection.succeeded)"
+    await TraceContext.emitStageEnd(dispatchStage, durationMs: dispatchMs, notes: summary)
+    let runMs = Double(DispatchTime.now().uptimeNanoseconds - runStartNs) / 1_000_000.0
+    await TraceContext.emit(kind: .runEnd, stage: "root", durationMs: runMs,
+      payload: { var p = TraceEvent.Payload(); p.notes = summary; return p }())
+    return result
   }
 
   // MARK: - Build Mode (default pipeline)
@@ -1274,21 +1305,27 @@ public actor Orchestrator {
 
   /// Classify the agent mode. Tries ML classifier first, falls back to LLM.
   private func classifyMode(query: String, memory: inout WorkingMemory) async -> AgentMode {
-    // Tier 1: Embedding prototype classifier (~5ms, no model file needed)
-    if let embMode = intentClassifier.classifyModeByEmbedding(query),
-       embMode.confidence > 0.85 {
+    let embResult = intentClassifier.classifyModeByEmbedding(query)
+    if let embMode = embResult, embMode.confidence > 0.85 {
       debug("Embedding mode classifier: \(embMode.mode) (similarity: \(String(format: "%.2f", embMode.confidence)))")
+      await TraceContext.emitDecision(stage: "classify", name: "modeClassifier.embedding",
+        observedValue: embMode.confidence, effectiveThreshold: 0.85,
+        pathTaken: "embedding", notes: "mode=\(embMode.mode)")
       return AgentMode(rawValue: embMode.mode.lowercased()) ?? .build
     }
-
-    // Tier 2: ML mode classifier (~10ms, needs .mlmodelc)
-    if let mlMode = intentClassifier.classifyMode(query),
-       mlMode.confidence > Config.mlClassifierConfidence {
+    let mlResult = intentClassifier.classifyMode(query)
+    if let mlMode = mlResult, mlMode.confidence > Config.mlClassifierConfidence {
       debug("ML mode classifier: \(mlMode.mode) (confidence: \(String(format: "%.2f", mlMode.confidence)))")
+      let rejected = embResult.map { ["embedding(\(String(format: "%.2f", $0.confidence)))"] } ?? ["embedding(none)"]
+      await TraceContext.emitDecision(stage: "classify", name: "modeClassifier.ml",
+        observedValue: mlMode.confidence, effectiveThreshold: Config.mlClassifierConfidence,
+        pathTaken: "ml", alternativesRejected: rejected, notes: "mode=\(mlMode.mode)")
       return AgentMode(rawValue: mlMode.mode.lowercased()) ?? .build
     }
-
-    // Tier 3: LLM fallback (~1-2s, 200 tokens)
+    let embDesc = embResult.map { "embedding(\(String(format: "%.2f", $0.confidence)))" } ?? "embedding(none)"
+    let mlDesc = mlResult.map { "ml(\(String(format: "%.2f", $0.confidence)))" } ?? "ml(none)"
+    await TraceContext.emitDecision(stage: "classify", name: "modeClassifier.llm",
+      pathTaken: "llmFallback", alternativesRejected: [embDesc, mlDesc])
     memory.trackCall(estimatedTokens: 200)
     do {
       let result = try await adapter.generateStructured(
@@ -1762,6 +1799,12 @@ public actor Orchestrator {
     debug("  action: \(action)")
 
     let toolOutput = await executeToolSafe(action: action, memory: &memory)
+
+    var toolPayload = TraceEvent.Payload()
+    toolPayload.tool = action.toolLabel
+    toolPayload.target = action.targetPath
+    toolPayload.output = String(toolOutput.prefix(800))
+    await TraceContext.emit(kind: .toolCall, stage: "execute", payload: toolPayload)
 
     // Notify CLI for live action log
     await activeCallbacks.onToolResult?(action.toolLabel, action.targetPath ?? "", toolOutput)

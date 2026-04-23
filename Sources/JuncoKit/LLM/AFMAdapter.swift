@@ -34,29 +34,52 @@ public actor AFMAdapter: LLMAdapter {
   // MARK: - Pre-warming
 
   public func prewarm() async {
-    let session = makeSession(system: nil)
+    let session = makeSession(instructions: nil, tools: [])
     session.prewarm()
   }
 
   public func prewarm(systemPrompt: String) async {
-    let session = makeSession(system: systemPrompt)
+    let session = makeSession(instructions: AFMInstructions.fromString(systemPrompt), tools: [])
     session.prewarm()
   }
 
   // MARK: - Session factory
 
-  private func makeSession(system: String?) -> FoundationModels.LanguageModelSession {
-    let model: FoundationModels.SystemLanguageModel = loraAdapter.map { FoundationModels.SystemLanguageModel(adapter: $0) } ?? .default
-    if let system {
-      return FoundationModels.LanguageModelSession(model: model, instructions: system)
-    } else {
+  private func systemModel() -> FoundationModels.SystemLanguageModel {
+    loraAdapter.map { FoundationModels.SystemLanguageModel(adapter: $0) } ?? .default
+  }
+
+  private func makeSession(
+    instructions: Instructions?,
+    tools: [any FoundationModels.Tool]
+  ) -> FoundationModels.LanguageModelSession {
+    let model = systemModel()
+    switch (instructions, tools.isEmpty) {
+    case (let inst?, true):
+      return FoundationModels.LanguageModelSession(model: model, instructions: inst)
+    case (let inst?, false):
+      return FoundationModels.LanguageModelSession(model: model, tools: tools, instructions: inst)
+    case (nil, true):
       return FoundationModels.LanguageModelSession(model: model)
+    case (nil, false):
+      return FoundationModels.LanguageModelSession(model: model, tools: tools)
     }
   }
 
   // MARK: - Plain text generation
 
   public func generate(prompt: String, system: String?) async throws -> String {
+    try await generate(prompt: prompt, system: system, tools: [])
+  }
+
+  /// Text generation with optional native AFM tools.
+  /// The model may call tools during generation; their schemas are injected into
+  /// the session's instructions automatically (via Tool.includesSchemaInInstructions).
+  public func generate(
+    prompt: String,
+    system: String?,
+    tools: [any FoundationModels.Tool]
+  ) async throws -> String {
     let safeSystem = system ?? ""
     let (compactSystem, compactPrompt) = await TokenGuard.compact(
       system: safeSystem,
@@ -66,7 +89,8 @@ public actor AFMAdapter: LLMAdapter {
       schemaOverhead: 0
     )
 
-    let session = makeSession(system: compactSystem.isEmpty ? nil : compactSystem)
+    let instructions = compactSystem.isEmpty ? nil : AFMInstructions.fromString(compactSystem)
+    let session = makeSession(instructions: instructions, tools: tools)
 
     do {
       let response = try await session.respond(to: compactPrompt)
@@ -83,7 +107,8 @@ public actor AFMAdapter: LLMAdapter {
     system: String?,
     onChunk: @escaping @Sendable (String) async -> Void
   ) async throws -> String {
-    let session = makeSession(system: system)
+    let instructions = AFMInstructions.fromString(system)
+    let session = makeSession(instructions: instructions, tools: [])
 
     do {
       var fullText = ""
@@ -110,6 +135,17 @@ public actor AFMAdapter: LLMAdapter {
     as type: T.Type,
     options: LLMGenerationOptions? = nil
   ) async throws -> T {
+    try await generateStructured(prompt: prompt, system: system, tools: [], as: type, options: options)
+  }
+
+  /// Structured generation with optional native AFM tools.
+  public func generateStructured<T: GenerableContent>(
+    prompt: String,
+    system: String?,
+    tools: [any FoundationModels.Tool],
+    as type: T.Type,
+    options: LLMGenerationOptions? = nil
+  ) async throws -> T {
     let safeSystem = system ?? ""
     let (compactSystem, compactPrompt) = await TokenGuard.compact(
       system: safeSystem,
@@ -119,7 +155,8 @@ public actor AFMAdapter: LLMAdapter {
       schemaOverhead: 150
     )
 
-    let session = makeSession(system: compactSystem.isEmpty ? nil : compactSystem)
+    let instructions = compactSystem.isEmpty ? nil : AFMInstructions.fromString(compactSystem)
+    let session = makeSession(instructions: instructions, tools: tools)
 
     do {
       if let options {
@@ -140,21 +177,23 @@ public actor AFMAdapter: LLMAdapter {
   public func countTokens(_ text: String) async -> Int {
     #if compiler(>=6.3)
     if #available(macOS 26.4, iOS 26.4, *) {
-      let fmModel: FoundationModels.SystemLanguageModel = loraAdapter.map { .init(adapter: $0) } ?? .default
-      return (try? await fmModel.tokenCount(for: text)) ?? AFMTokenEstimator.countTokens(text)
+      return (try? await systemModel().tokenCount(for: text)) ?? AFMTokenEstimator.countTokens(text)
     }
     #endif
     return AFMTokenEstimator.countTokens(text)
   }
 
+  /// Max context window in tokens. Derived from the live SystemLanguageModel —
+  /// `contextSize` is @backDeployed(before: macOS 26.4), so it's callable on 26.0+
+  /// when built with Swift 6.3 SDK. A user may override it via
+  /// $META_CONFIG_JSON (contextWindow key) for A/B testing.
   public var contextSize: Int {
+    if let override = MetaConfig.shared.contextWindow { return override }
     #if compiler(>=6.3)
-    if #available(macOS 26.4, iOS 26.4, *) {
-      let fmModel: FoundationModels.SystemLanguageModel = loraAdapter.map { .init(adapter: $0) } ?? .default
-      return fmModel.contextSize
-    }
-    #endif
+    return systemModel().contextSize
+    #else
     return 4096
+    #endif
   }
 
   // MARK: - Error mapping

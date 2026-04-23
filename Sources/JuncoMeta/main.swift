@@ -490,6 +490,7 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
   var totalTokens = 0
   var totalDuration = 0.0
 
+  var caseRefSims: [String: [Double]] = [:]
   for run in runs {
     totalLlmCalls += run.totalLlmCalls
     totalTokens += run.totalTokens
@@ -499,6 +500,9 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
       caseDurations[c.name, default: []].append(c.duration)
       if let mc = c.modeCorrect {
         caseModeCorrect[c.name, default: []].append(mc)
+      }
+      if let sim = c.referenceSimilarity {
+        caseRefSims[c.name, default: []].append(sim)
       }
     }
   }
@@ -514,6 +518,7 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
     let maxDurationSeconds: Double
     let highVariance: Bool
     let modeCorrectRate: Double?
+    let medianReferenceSimilarity: Double?
   }
   var aggCases: [AggCase] = []
   var durations: [Double] = []
@@ -527,6 +532,9 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
     let highVar = maxD - minD > 10.0  // 10s delta → high variance flag
     let mcList = caseModeCorrect[name] ?? []
     let mcRate = mcList.isEmpty ? nil : Double(mcList.filter { $0 }.count) / Double(mcList.count)
+    let simList = caseRefSims[name] ?? []
+    let sortedSims = simList.sorted()
+    let simMedian = sortedSims.isEmpty ? nil : sortedSims[sortedSims.count / 2]
     aggCases.append(AggCase(
       name: name,
       succeededInAllRuns: caseSuccessCount[name] == replicates,
@@ -536,7 +544,8 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
       minDurationSeconds: minD,
       maxDurationSeconds: maxD,
       highVariance: highVar,
-      modeCorrectRate: mcRate
+      modeCorrectRate: mcRate,
+      medianReferenceSimilarity: simMedian
     ))
   }
 
@@ -565,10 +574,16 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
     let modeCorrectCount: Int
     let modeExpectedCount: Int
     let highVarianceCaseCount: Int
+    let referenceScoredCount: Int
+    let meanReferenceSimilarity: Double?
+    let minReferenceSimilarity: Double?
     let cases: [AggCase]
   }
   let modeExpected = aggCases.filter { $0.modeCorrectRate != nil }.count
   let modeCorrect = aggCases.compactMap { $0.modeCorrectRate }.filter { $0 >= 1.0 }.count
+  let scoredCases = aggCases.compactMap { $0.medianReferenceSimilarity }
+  let meanRef = scoredCases.isEmpty ? nil : scoredCases.reduce(0, +) / Double(scoredCases.count)
+  let minRef = scoredCases.min()
   let agg = AggSummary(
     replicateCount: replicates,
     caseCount: caseNames.count,
@@ -585,6 +600,9 @@ func aggregateReplicates(candidateId: String, replicates: Int) {
     modeCorrectCount: modeCorrect,
     modeExpectedCount: modeExpected,
     highVarianceCaseCount: aggCases.filter { $0.highVariance }.count,
+    referenceScoredCount: scoredCases.count,
+    meanReferenceSimilarity: meanRef,
+    minReferenceSimilarity: minRef,
     cases: aggCases
   )
   try? writeJSON(agg, path: MetaFS.summaryPath(candidateId))
@@ -649,6 +667,7 @@ struct Summary: Decodable {
     let llmCalls: Int?
     let tokensUsed: Int?
     let durationSeconds: Double?
+    let referenceSimilarity: Double?
     // Aggregate fields
     let succeededInAllRuns: Bool?
     let successCount: Int?
@@ -658,6 +677,7 @@ struct Summary: Decodable {
     let maxDurationSeconds: Double?
     let highVariance: Bool?
     let modeCorrectRate: Double?
+    let medianReferenceSimilarity: Double?
 
     /// Canonical `succeeded` across both formats.
     var didSucceed: Bool {

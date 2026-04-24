@@ -66,8 +66,25 @@ public struct SafeShell: Sendable {
 
     return try await Task.detached {
       let process = Process()
-      let stdoutPipe = Pipe()
-      let stderrPipe = Pipe()
+
+      // Redirect stdout/stderr to tempfiles rather than Pipes. The previous Pipe
+      // implementation deadlocked under high output volume: reading stdout first blocks
+      // the parent until EOF, but the child can't close stdout while it's blocked writing
+      // to a full stderr pipe (~64 KB kernel buffer). File redirection has no such limit.
+      let outPath = NSTemporaryDirectory() + "junco-shell-out-\(UUID().uuidString).log"
+      let errPath = NSTemporaryDirectory() + "junco-shell-err-\(UUID().uuidString).log"
+      FileManager.default.createFile(atPath: outPath, contents: nil)
+      FileManager.default.createFile(atPath: errPath, contents: nil)
+      guard let outHandle = try? FileHandle(forWritingTo: URL(fileURLWithPath: outPath)),
+            let errHandle = try? FileHandle(forWritingTo: URL(fileURLWithPath: errPath)) else {
+        throw ShellError.executionFailed("Cannot open shell output tempfiles")
+      }
+      defer {
+        try? outHandle.close()
+        try? errHandle.close()
+        try? FileManager.default.removeItem(atPath: outPath)
+        try? FileManager.default.removeItem(atPath: errPath)
+      }
 
       // Layer 3: sandbox-exec (OS-level file system restriction)
       if Config.sandboxEnabled {
@@ -78,27 +95,32 @@ public struct SafeShell: Sendable {
         process.arguments = ["-c", command]
       }
 
-      process.standardOutput = stdoutPipe
-      process.standardError = stderrPipe
+      process.standardOutput = outHandle
+      process.standardError = errHandle
       process.currentDirectoryURL = URL(fileURLWithPath: cwd)
 
       try process.run()
 
-      // Timeout via SIGINT
+      // Timeout: SIGINT first, escalate to SIGKILL 2s later if the child ignores it.
       let timer = DispatchSource.makeTimerSource()
       timer.schedule(deadline: .now() + effectiveTimeout)
-      timer.setEventHandler {
-        if process.isRunning { process.interrupt() }
+      timer.setEventHandler { [process] in
+        if process.isRunning {
+          process.interrupt()
+          DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+          }
+        }
       }
       timer.resume()
 
-      // Read pipes before wait to avoid deadlock
-      let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-      let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
       process.waitUntilExit()
-
       timer.cancel()
+      try? outHandle.close()
+      try? errHandle.close()
 
+      let outData = (try? Data(contentsOf: URL(fileURLWithPath: outPath))) ?? Data()
+      let errData = (try? Data(contentsOf: URL(fileURLWithPath: errPath))) ?? Data()
       return ShellResult(
         stdout: String(data: outData, encoding: .utf8) ?? "",
         stderr: String(data: errData, encoding: .utf8) ?? "",

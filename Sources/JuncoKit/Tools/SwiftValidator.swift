@@ -46,12 +46,25 @@ public struct SwiftValidator: CodeValidator, Sendable {
   }
 
   /// Run swiftc with given arguments. Returns stderr if exit code != 0, nil if clean or error.
+  ///
+  /// Redirects stderr to a temp file rather than a `Pipe`, because Pipe's kernel buffer
+  /// (~64 KB on macOS) deadlocks when swiftc emits a long error dump: the child blocks on
+  /// write(), the timer's `terminate()` sends SIGTERM but the child can be stuck in the
+  /// write syscall, and `waitUntilExit()` never returns. File redirection has no such limit.
   private func runCompiler(args: [String], timeout: TimeInterval) -> String? {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
     process.arguments = ["swiftc"] + args
-    let errPipe = Pipe()
-    process.standardError = errPipe
+    let errPath = NSTemporaryDirectory() + "junco-swiftcheck-err-\(UUID().uuidString).log"
+    guard FileManager.default.createFile(atPath: errPath, contents: nil),
+          let errHandle = try? FileHandle(forWritingTo: URL(fileURLWithPath: errPath)) else {
+      return nil
+    }
+    defer {
+      try? errHandle.close()
+      try? FileManager.default.removeItem(atPath: errPath)
+    }
+    process.standardError = errHandle
     process.standardOutput = FileHandle.nullDevice
 
     do {
@@ -60,10 +73,18 @@ public struct SwiftValidator: CodeValidator, Sendable {
       return nil  // Compiler not available
     }
 
-    // Timeout enforcement: terminate if still running after limit
+    // Timeout enforcement: terminate if still running after limit; escalate to SIGKILL
+    // 2s later in case the child is stuck in a syscall that absorbs SIGTERM silently.
     let timer = DispatchSource.makeTimerSource(queue: .global())
     timer.schedule(deadline: .now() + timeout)
-    timer.setEventHandler { process.terminate() }
+    timer.setEventHandler { [process] in
+      if process.isRunning {
+        process.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+          if process.isRunning { kill(process.processIdentifier, SIGKILL) }
+        }
+      }
+    }
     timer.resume()
 
     process.waitUntilExit()
@@ -73,7 +94,9 @@ public struct SwiftValidator: CodeValidator, Sendable {
     guard process.terminationReason == .exit else { return nil }
     guard process.terminationStatus != 0 else { return nil }
 
-    return String(data: errPipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    try? errHandle.close()
+    let data = (try? Data(contentsOf: URL(fileURLWithPath: errPath))) ?? Data()
+    return String(data: data, encoding: .utf8) ?? ""
   }
 
   /// Format compiler errors into concise LLM feedback.

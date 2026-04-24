@@ -13,12 +13,24 @@ import NaturalLanguage
 public struct FixtureChecker: Sendable {
   public init() {}
 
-  /// Run every check against the file at `filePath` and the optional answer text.
-  /// Missing file yields every structural check failing with "file not found".
+  /// Per-case metadata passed alongside source/answer to the check evaluators.
+  public struct EvalContext: Sendable {
+    public var llmCalls: Int?
+    public var durationSec: Double?
+    public var mode: String?
+    public init(llmCalls: Int? = nil, durationSec: Double? = nil, mode: String? = nil) {
+      self.llmCalls = llmCalls; self.durationSec = durationSec; self.mode = mode
+    }
+  }
+
+  /// Run every check against the file at `filePath`, the optional answer text, and the
+  /// optional case metadata. Missing file yields every file-check failing with
+  /// "file not found"; missing answer yields every answer-check failing similarly.
   public func run(
     checks: [SubCheck],
     filePath: String?,
     answer: String? = nil,
+    context: EvalContext = EvalContext(),
     workingDirectory: String
   ) -> [SubCheckResult] {
     let absolutePath: String?
@@ -30,11 +42,11 @@ public struct FixtureChecker: Sendable {
       absolutePath = nil
     }
     let source: String? = absolutePath.flatMap { try? String(contentsOfFile: $0, encoding: .utf8) }
-    return checks.map { evaluate($0, source: source, path: absolutePath, answer: answer) }
+    return checks.map { evaluate($0, source: source, path: absolutePath, answer: answer, context: context) }
   }
 
   private func evaluate(
-    _ check: SubCheck, source: String?, path: String?, answer: String?
+    _ check: SubCheck, source: String?, path: String?, answer: String?, context: EvalContext
   ) -> SubCheckResult {
     switch check.kind {
     case "compiles":
@@ -58,9 +70,134 @@ public struct FixtureChecker: Sendable {
     case "referenceSimilarity":
       return checkReferenceSimilarity(check: check, answer: answer, source: source)
 
+    case "answerContains":
+      return checkAnswerContains(check: check, answer: answer)
+    case "answerDoesNotContain":
+      return checkAnswerDoesNotContain(check: check, answer: answer)
+    case "answerMentionsAny":
+      return checkAnswerMentionsAny(check: check, answer: answer)
+    case "answerMatches":
+      return checkAnswerMatches(check: check, answer: answer)
+    case "answerCitesPath":
+      return checkAnswerCitesPath(check: check, answer: answer)
+    case "answerLengthOver":
+      return checkAnswerLengthOver(check: check, answer: answer)
+    case "answerLengthUnder":
+      return checkAnswerLengthUnder(check: check, answer: answer)
+    case "llmCallsUnder":
+      return checkLlmCallsUnder(check: check, context: context)
+    case "durationUnder":
+      return checkDurationUnder(check: check, context: context)
+    case "modeIs":
+      return checkModeIs(check: check, context: context)
+
     default:
       return SubCheckResult(label: check.label, passed: false, detail: "unknown kind")
     }
+  }
+
+  // MARK: - Answer / context kinds
+
+  private func normalized(_ s: String, ci: Bool?) -> String {
+    (ci ?? true) ? s.lowercased() : s
+  }
+
+  private func checkAnswerContains(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer, let text = check.text else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer or text")
+    }
+    let passed = normalized(answer, ci: check.caseInsensitive)
+      .contains(normalized(text, ci: check.caseInsensitive))
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "substring not found")
+  }
+
+  private func checkAnswerDoesNotContain(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer, let text = check.text else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer or text")
+    }
+    let passed = !normalized(answer, ci: check.caseInsensitive)
+      .contains(normalized(text, ci: check.caseInsensitive))
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "forbidden substring present")
+  }
+
+  private func checkAnswerMentionsAny(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer, let options = check.anyOf, !options.isEmpty else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer or anyOf")
+    }
+    let haystack = normalized(answer, ci: check.caseInsensitive)
+    let passed = options.contains { haystack.contains(normalized($0, ci: check.caseInsensitive)) }
+    return SubCheckResult(label: check.label, passed: passed,
+                          detail: passed ? nil : "none of \(options.count) options mentioned")
+  }
+
+  private func checkAnswerMatches(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer, let pattern = check.pattern else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer or pattern")
+    }
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: check.caseInsensitive ?? true ? [.caseInsensitive] : []) else {
+      return SubCheckResult(label: check.label, passed: false, detail: "invalid regex")
+    }
+    let nsRange = NSRange(answer.startIndex..., in: answer)
+    let passed = regex.firstMatch(in: answer, range: nsRange) != nil
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "no match")
+  }
+
+  private func checkAnswerCitesPath(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer")
+    }
+    // Matches things like "Sources/X/Y.swift", "Tests/Foo.swift", "Package.swift",
+    // or the "path:line" citation form "Sources/X/Y.swift:123".
+    let pattern = #"\b(?:Sources|Tests|Package\.swift|[\w-]+)/[\w/.-]+\.(?:swift|md|json|plist)(?::\d+)?"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else {
+      return SubCheckResult(label: check.label, passed: false, detail: "regex failed")
+    }
+    let nsRange = NSRange(answer.startIndex..., in: answer)
+    let matches = regex.numberOfMatches(in: answer, range: nsRange)
+    let passed = matches > 0
+    return SubCheckResult(label: check.label, passed: passed,
+                          detail: passed ? nil : "no file-path-like citation found")
+  }
+
+  private func checkAnswerLengthOver(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer, let min = check.minLength else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer or minLength")
+    }
+    let passed = answer.count >= min
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "length \(answer.count) < \(min)")
+  }
+
+  private func checkAnswerLengthUnder(check: SubCheck, answer: String?) -> SubCheckResult {
+    guard let answer, let max = check.maxLength else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing answer or maxLength")
+    }
+    let passed = answer.count <= max
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "length \(answer.count) > \(max)")
+  }
+
+  private func checkLlmCallsUnder(check: SubCheck, context: EvalContext) -> SubCheckResult {
+    guard let calls = context.llmCalls, let max = check.maxLlmCalls else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing llmCalls or bound")
+    }
+    let passed = calls <= max
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "\(calls) > \(max)")
+  }
+
+  private func checkDurationUnder(check: SubCheck, context: EvalContext) -> SubCheckResult {
+    guard let dur = context.durationSec, let max = check.maxDurationSec else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing duration or bound")
+    }
+    let passed = dur <= max
+    return SubCheckResult(label: check.label, passed: passed,
+                          detail: passed ? nil : String(format: "%.1fs > %.1fs", dur, max))
+  }
+
+  private func checkModeIs(check: SubCheck, context: EvalContext) -> SubCheckResult {
+    guard let mode = context.mode, let expected = check.expectedMode else {
+      return SubCheckResult(label: check.label, passed: false, detail: "missing mode")
+    }
+    let passed = mode.lowercased() == expected.lowercased()
+    return SubCheckResult(label: check.label, passed: passed, detail: passed ? nil : "mode=\(mode) expected=\(expected)")
   }
 
   // MARK: - Kinds

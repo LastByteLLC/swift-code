@@ -1060,10 +1060,18 @@ struct EvalHarness {
       let similarity = referenceScorer.score(caseName: evalCase.name, answer: result.reflection.insight)
       let modified = Array(result.memory.touchedFiles)
       let (codeCompiles, codeError) = validateGeneratedSwift(paths: modified)
-      let checks = evalCase.checks.isEmpty ? [] : FixtureChecker().run(
-        checks: evalCase.checks,
+      // E10: non-destructive cases declare their sub-checks in a lookup map to
+      // avoid bloating each EvalCase init. Merge with any explicit inline checks.
+      let mergedChecks = evalCase.checks + (NonDestructiveChecks.byCase[evalCase.name] ?? [])
+      let checks = mergedChecks.isEmpty ? [] : FixtureChecker().run(
+        checks: mergedChecks,
         filePath: evalCase.targetFile,
         answer: result.reflection.insight,
+        context: FixtureChecker.EvalContext(
+          llmCalls: result.memory.llmCalls,
+          durationSec: duration,
+          mode: capturedMode.rawValue
+        ),
         workingDirectory: workingDirectory
       )
       return EvalResult(

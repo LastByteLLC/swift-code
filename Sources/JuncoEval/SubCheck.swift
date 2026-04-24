@@ -22,18 +22,36 @@ public struct SubCheck: Sendable, Codable {
   public let minSimilarity: Double?
   public let reference: String?
   public let absent: Bool?
+  // Answer/result-text checks (E10):
+  public let text: String?           // substring for answerContains / answerDoesNotContain
+  public let pattern: String?        // regex for answerMatches
+  public let anyOf: [String]?        // any-of substring match (answerMentionsAny)
+  public let minLength: Int?         // answerLengthOver — forces a non-trivial answer
+  public let maxLength: Int?         // answerLengthUnder — prevents verbose drift
+  public let maxLlmCalls: Int?       // llmCallsUnder — efficiency bound
+  public let maxDurationSec: Double? // durationUnder — efficiency bound
+  public let expectedMode: String?   // modeIs — build/answer
+  public let caseInsensitive: Bool?  // default true for answer checks
 
   public init(
     kind: String, name: String? = nil, category: String? = nil,
     conformsTo: [String]? = nil, on: String? = nil, names: [String]? = nil,
     member: String? = nil, returns: String? = nil,
-    minSimilarity: Double? = nil, reference: String? = nil, absent: Bool? = nil
+    minSimilarity: Double? = nil, reference: String? = nil, absent: Bool? = nil,
+    text: String? = nil, pattern: String? = nil, anyOf: [String]? = nil,
+    minLength: Int? = nil, maxLength: Int? = nil,
+    maxLlmCalls: Int? = nil, maxDurationSec: Double? = nil,
+    expectedMode: String? = nil, caseInsensitive: Bool? = nil
   ) {
     self.kind = kind; self.name = name; self.category = category
     self.conformsTo = conformsTo; self.on = on; self.names = names
     self.member = member; self.returns = returns
     self.minSimilarity = minSimilarity; self.reference = reference
     self.absent = absent
+    self.text = text; self.pattern = pattern; self.anyOf = anyOf
+    self.minLength = minLength; self.maxLength = maxLength
+    self.maxLlmCalls = maxLlmCalls; self.maxDurationSec = maxDurationSec
+    self.expectedMode = expectedMode; self.caseInsensitive = caseInsensitive
   }
 
   /// Short human-readable description for traces and summary reports.
@@ -45,6 +63,16 @@ public struct SubCheck: Sendable, Codable {
     case "hasConformance": return "hasConformance(\(on ?? "?"):\(conformsTo?.joined(separator: ",") ?? "?"))"
     case "hasMember": return "hasMember(\(on ?? "?").\(name ?? "?"))"
     case "doesNotReferenceType": return "doesNotReferenceType(\(name ?? "?"))"
+    case "answerContains": return "answerContains(\(text ?? "?"))"
+    case "answerDoesNotContain": return "answerDoesNotContain(\(text ?? "?"))"
+    case "answerMentionsAny": return "answerMentionsAny(\(anyOf?.first ?? "?")…)"
+    case "answerMatches": return "answerMatches(/\(pattern ?? "?")/)"
+    case "answerCitesPath": return "answerCitesPath"
+    case "answerLengthOver": return "answerLengthOver(\(minLength ?? 0))"
+    case "answerLengthUnder": return "answerLengthUnder(\(maxLength ?? 0))"
+    case "llmCallsUnder": return "llmCallsUnder(\(maxLlmCalls ?? 0))"
+    case "durationUnder": return "durationUnder(\(maxDurationSec ?? 0)s)"
+    case "modeIs": return "modeIs(\(expectedMode ?? "?"))"
     default: return kind
     }
   }

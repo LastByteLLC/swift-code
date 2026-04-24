@@ -425,4 +425,93 @@ struct TreeSitterRepairTests {
     #expect(!fixed.contains("TrafficLight.now"))
     #expect(fixed.contains("switch self"))
   }
+
+  // MARK: - Pass 6: id: \.self for primitive arrays
+
+  @Test("Adds id: \\.self when ForEach iterates @State [String] without id")
+  func addIdKeyPathForEachString() {
+    let code = """
+      import SwiftUI
+
+      struct TodoListView: View {
+          @State private var items: [String] = ["Buy milk", "Walk dog"]
+
+          var body: some View {
+              NavigationStack {
+                  List {
+                      ForEach(items) { item in
+                          Text(item)
+                      }
+                  }
+              }
+          }
+      }
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(fixes.contains(where: { $0.contains("id: \\.self") }))
+    #expect(fixed.contains("ForEach(items, id: \\.self)"))
+  }
+
+  @Test("Adds id: \\.self when List iterates @State [String] inferred from literal")
+  func addIdKeyPathListInferred() {
+    let code = """
+      import SwiftUI
+
+      struct V: View {
+          @State var items = ["a", "b"]
+
+          var body: some View {
+              List(items) { item in
+                  Text(item)
+              }
+          }
+      }
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(fixes.contains(where: { $0.contains("id: \\.self") }))
+    #expect(fixed.contains("List(items, id: \\.self)"))
+  }
+
+  @Test("Does not touch ForEach when id: is already present")
+  func doesNotDuplicateIdKeyPath() {
+    let code = """
+      import SwiftUI
+
+      struct V: View {
+          @State var items: [String] = ["a"]
+
+          var body: some View {
+              ForEach(items, id: \\.self) { item in
+                  Text(item)
+              }
+          }
+      }
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(!fixes.contains(where: { $0.contains("id: \\.self") }))
+    #expect(fixed == code || fixed.trimmingCharacters(in: .whitespacesAndNewlines)
+                    == code.trimmingCharacters(in: .whitespacesAndNewlines))
+  }
+
+  @Test("Does not touch ForEach over Identifiable collection")
+  func doesNotKeyIdentifiableCollection() {
+    let code = """
+      import SwiftUI
+
+      struct Item: Identifiable { var id = UUID() }
+
+      struct V: View {
+          @State var items: [Item] = []
+
+          var body: some View {
+              ForEach(items) { item in
+                  Text(item.id.uuidString)
+              }
+          }
+      }
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(!fixes.contains(where: { $0.contains("id: \\.self") }))
+    #expect(fixed.contains("ForEach(items)"))
+  }
 }

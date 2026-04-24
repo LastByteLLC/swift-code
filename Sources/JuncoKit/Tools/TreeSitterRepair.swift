@@ -58,6 +58,13 @@ public struct TreeSitterRepair: Sendable {
       current = pulled.code
     }
 
+    // Pass 6: Add `id: \.self` to ForEach/List over non-Identifiable primitive arrays
+    let keyed = addIdKeyPathForPrimitiveArrays(current)
+    if keyed.added > 0 {
+      fixes.append("added id: \\.self to \(keyed.added) ForEach/List call(s)")
+      current = keyed.code
+    }
+
     return (current, fixes)
   }
 
@@ -516,6 +523,89 @@ public struct TreeSitterRepair: Sendable {
       result.replaceSubrange(full, with: replacement)
     }
     return result
+  }
+
+  // MARK: - Pass 6: Add id: \.self to ForEach/List over Primitive Arrays
+
+  /// AFM's common SwiftUI failure: `@State var items: [String]` followed by
+  /// `ForEach(items) { ... }` or `List(items) { ... }` — both require an `id:`
+  /// key-path when the element type isn't Identifiable. This pass:
+  ///   1. scans for `@State` (or `@Published`) vars whose type or initializer
+  ///      resolves to an array of a known non-Identifiable primitive
+  ///      (String, Int, Double, Float, Bool, UUID, Date);
+  ///   2. finds `ForEach(<name>)` / `List(<name>)` call sites that lack an
+  ///      explicit `id:` argument;
+  ///   3. rewrites to `ForEach(<name>, id: \.self)` / `List(<name>, id: \.self)`.
+  ///
+  /// Conservative: skips when the call already contains `id:`, when the name
+  /// is reassigned later (ignored), and when the primitive inference fails.
+  public func addIdKeyPathForPrimitiveArrays(_ code: String) -> (code: String, added: Int) {
+    // Collect `@State` / `@Published` var names whose array element type is a known primitive.
+    let primitives: Set<String> = ["String", "Int", "Double", "Float", "Bool", "UUID", "Date", "Character"]
+    // `@State (private|public|…)? var <name>[: [Type]]? [= [literals]]`
+    let declPattern = #"^\s*@(?:State|Published|StateObject|AppStorage)(?:\s+\w+)*\s+(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?var\s+(\w+)\s*(?::\s*\[([A-Za-z_]\w*)\])?\s*(?:=\s*\[([^\]]*)\])?"#
+    guard let declRegex = try? NSRegularExpression(pattern: declPattern, options: [.anchorsMatchLines]) else {
+      return (code, 0)
+    }
+    var primitiveNames: Set<String> = []
+    let codeNS = code as NSString
+    let fullRange = NSRange(location: 0, length: codeNS.length)
+    for m in declRegex.matches(in: code, range: fullRange) {
+      guard m.numberOfRanges >= 2 else { continue }
+      let name = codeNS.substring(with: m.range(at: 1))
+      // Prefer explicit annotation.
+      if m.range(at: 2).location != NSNotFound {
+        let typeName = codeNS.substring(with: m.range(at: 2))
+        if primitives.contains(typeName) {
+          primitiveNames.insert(name)
+        }
+        continue
+      }
+      // Fall back to inferring from literal initializer.
+      if m.range(at: 3).location != NSNotFound {
+        let literals = codeNS.substring(with: m.range(at: 3))
+        if inferArrayLiteralElementIsPrimitive(literals, primitives: primitives) {
+          primitiveNames.insert(name)
+        }
+      }
+    }
+    guard !primitiveNames.isEmpty else { return (code, 0) }
+
+    var result = code
+    var added = 0
+    for name in primitiveNames {
+      let escaped = NSRegularExpression.escapedPattern(for: name)
+      // Match `ForEach(name)` or `List(name)` with no other argument before the
+      // closing paren. We only fix the single-arg form to stay conservative.
+      let callPattern = "\\b(ForEach|List)\\(\\s*(\(escaped))\\s*\\)"
+      guard let callRegex = try? NSRegularExpression(pattern: callPattern) else { continue }
+      let ns = result as NSString
+      let matches = callRegex.matches(in: result, range: NSRange(location: 0, length: ns.length))
+      guard !matches.isEmpty else { continue }
+      // Replace from last to first so indices remain valid.
+      for m in matches.reversed() {
+        let callerName = ns.substring(with: m.range(at: 1))
+        let replacement = "\(callerName)(\(name), id: \\.self)"
+        result = (result as NSString).replacingCharacters(in: m.range, with: replacement)
+        added += 1
+      }
+    }
+    return (result, added)
+  }
+
+  /// Return true if an array-literal body like `"a", "b"` or `1, 2, 3` contains
+  /// elements of one of the known primitive types.
+  private func inferArrayLiteralElementIsPrimitive(_ body: String, primitives: Set<String>) -> Bool {
+    let trimmed = body.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    let firstElement = trimmed
+      .components(separatedBy: ",").first?
+      .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if firstElement.hasPrefix("\"") && primitives.contains("String") { return true }
+    if Int(firstElement) != nil && primitives.contains("Int") { return true }
+    if Double(firstElement) != nil && primitives.contains("Double") { return true }
+    if firstElement == "true" || firstElement == "false" { return primitives.contains("Bool") }
+    return false
   }
 
   // MARK: - Helpers

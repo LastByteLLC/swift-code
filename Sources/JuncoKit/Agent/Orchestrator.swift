@@ -2231,6 +2231,7 @@ public actor Orchestrator {
   ) async throws -> (content: String, error: String?) {
     var content = linter.lint(content: content, filePath: filePath)
     let originalContent = content // preserve pre-retry content
+    let originalTypeCount = Self.countTopLevelTypeDecls(originalContent)
 
     // Brief task context so retries know the original intent
     let taskHint = TokenBudget.truncate(memory.query, toTokens: 60)
@@ -2241,47 +2242,47 @@ public actor Orchestrator {
       guard let error = feedback else { break }
       retries += 1
 
+      let candidate: String
       if let region = errorExtractor.extract(content: content, errorMessage: error) {
-        debug("Targeted retry \(retries) for \(filePath) (lines \(region.startLine)-\(region.endLine)): \(error)")
         memory.trackCall(estimatedTokens: 500)
         let fixed = try await adapter.generateStructured(
           prompt: "Fix this code.\nTask: \(taskHint)\nError: \(String(error.prefix(200)))\n\nCode:\n\(region.text)",
           system: "Fix ONLY this code region. Return the corrected code.",
           as: CodeFragment.self,
-          options: GenerationProfile.codeGen(maxTokens: 500).options()
-        )
-        // Empty AFM output (observed under greedy structured decoding) would splice a
-        // blank into the file and leave CVF spinning.
+          options: GenerationProfile.codeGen(maxTokens: 500).options())
         if fixed.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
-        content = errorExtractor.splice(original: content, region: region, fix: fixed.content)
+        candidate = errorExtractor.splice(original: content, region: region, fix: fixed.content)
       } else {
-        debug("Full retry \(retries) for \(filePath): \(error)")
         memory.trackCall(estimatedTokens: 800)
         let truncatedCode = TokenBudget.truncate(content, toTokens: 800)
         let fixed = try await adapter.generateStructured(
           prompt: "Fix this code.\nTask: \(taskHint)\nError: \(String(error.prefix(200)))\n\nCode:\n\(truncatedCode)",
           system: "Fix the error. Return the complete corrected file.",
           as: CreateParams.self,
-          options: GenerationProfile.codeGen(maxTokens: 1200).options()
-        )
+          options: GenerationProfile.codeGen(maxTokens: 1200).options())
         if fixed.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
-        content = fixed.content
+        candidate = fixed.content
       }
-      content = linter.lint(content: content, filePath: filePath)
+      // E5: reject fixes that drop types vs pre-retry content — AFM shrinks
+      // multi-type files into smaller blobs.
+      if Self.countTopLevelTypeDecls(candidate) < originalTypeCount { break }
+      content = linter.lint(content: candidate, filePath: filePath)
     }
 
-    if let finalError = validatorRegistry.validate(code: content, filePath: filePath) {
-      // If retries made it worse, fall back to the original if it validates
-      if retries > 0,
-         validatorRegistry.validate(code: originalContent, filePath: filePath) == nil {
-        debug("Retries degraded content for \(filePath) — reverting to original")
-        return (originalContent, nil)
-      }
-      debug("Validation failed after \(retries) retries for \(filePath): \(finalError)")
-      return (content, "VALIDATION FAILED: \(finalError)")
+    guard let finalError = validatorRegistry.validate(code: content, filePath: filePath) else {
+      return (content, nil)
     }
-
-    return (content, nil)
+    if retries > 0, validatorRegistry.validate(code: originalContent, filePath: filePath) == nil {
+      return (originalContent, nil)
+    }
+    // E5: when $JUNCO_WRITE_ON_VALIDATION_FAILURE=1, prefer writing over silent drop so the
+    // sub-check instrument can observe the types AFM got right. Revert to original when
+    // retries shrank structural content; otherwise keep current.
+    if ProcessInfo.processInfo.environment["JUNCO_WRITE_ON_VALIDATION_FAILURE"] == "1" {
+      let shrank = retries > 0 && Self.countTopLevelTypeDecls(content) < originalTypeCount
+      return (shrank ? originalContent : content, nil)
+    }
+    return (content, "VALIDATION FAILED: \(finalError)")
   }
 
   // MARK: - Build-Fix Reflexion Loop
@@ -2612,6 +2613,30 @@ public enum OrchestratorError: Error, Sendable {
 extension Orchestrator {
   /// After destructive eval rewinds, force the next run() to re-read disk.
   public func invalidateProjectState() { needsReindex = true }
+
+  /// Count top-level `struct`/`class`/`enum`/`actor`/`protocol` declarations in Swift
+  /// source. Uses brace-depth tracking to skip nested types. Consumed by the E5
+  /// structural-preservation guard in `validateAndFix`.
+  fileprivate static func countTopLevelTypeDecls(_ source: String) -> Int {
+    let pattern = #"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+|final\s+)*(?:struct|class|enum|actor|protocol)\s+\w+"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return 0 }
+    var count = 0
+    var depth = 0
+    for line in source.components(separatedBy: "\n") {
+      if depth == 0,
+         regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil {
+        count += 1
+      }
+      for ch in line {
+        if ch == "{" {
+          depth += 1
+        } else if ch == "}" {
+          depth = max(0, depth - 1)
+        }
+      }
+    }
+    return count
+  }
 }
 
 /// Thread-safe flag for cross-actor communication (FileWatcher → Orchestrator).

@@ -739,6 +739,10 @@ struct EvalHarness {
     reportPath: String? = nil,
     splitFilter: EvalSplit? = nil
   ) async -> String {
+    // EvalHarness runs under `swift run junco-eval`, which holds the SPM .build/ lock.
+    // Any buildAndFix call inside the Orchestrator would deadlock on it. Signal the
+    // Orchestrator to skip that stage.
+    setenv("JUNCO_SKIP_BUILD_FIX", "1", 1)
     let adapter = AFMAdapter()
 
     var cases = Self.nonDestructiveCases

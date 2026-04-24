@@ -2247,9 +2247,17 @@ public actor Orchestrator {
 
   /// After all execute steps, run a build and attempt to fix errors.
   /// Uses targeted retry: extract error region, fix just that part.
+  ///
+  /// Skipped when `$JUNCO_SKIP_BUILD_FIX=1` — needed during eval harness runs because
+  /// `swift build` called here would deadlock on the SPM `.build/` lock held by the
+  /// outer `swift run junco-eval` process (observed as an indefinite hang in create-hello).
   private func buildAndFix(memory: inout WorkingMemory, maxCycles: Int = 2) async {
     guard metrics.filesModified > 0 else { return }
     guard domain.buildCommand != nil else { return }
+    if ProcessInfo.processInfo.environment["JUNCO_SKIP_BUILD_FIX"] == "1" {
+      debug("buildAndFix skipped (JUNCO_SKIP_BUILD_FIX=1)")
+      return
+    }
 
     for cycle in 0..<maxCycles {
       let buildResult = await buildRunner.verify()

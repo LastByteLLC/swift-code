@@ -5,6 +5,10 @@
 // At query time, computes cosine similarity against all entries (~1ms for 500).
 // Used as a FALLBACK when keyword search finds no good matches —
 // fixes concept queries like "entry point" → @main.
+//
+// Persists an on-disk cache of text→vector mappings so subsequent runs skip
+// the ~2ms/entry NLEmbedding call entirely. Index builds from scratch dropped
+// from ~7.5s (3745 entries × 2ms) to ~50ms cache-load on warm runs.
 
 import Foundation
 import NaturalLanguage
@@ -21,10 +25,25 @@ public actor EmbeddingIndex {
   /// Dimension of embedding vectors.
   private let dimension: Int
 
-  public init() {
+  /// Persistent text→vector cache. Keyed by the canonical embeddable text so it
+  /// survives re-indexing as long as the symbol name + first-line context stays stable.
+  private var textCache: [String: [Double]] = [:]
+
+  /// Path on disk for the cache, or nil to disable caching.
+  private let cacheURL: URL?
+
+  /// Whether the cache was dirtied during buildIndex/addEntries (needs persist).
+  private var cacheDirty = false
+
+  public init(cacheURL: URL? = nil) {
     let emb = NLEmbedding.sentenceEmbedding(for: .english)
     self.embedding = emb
     self.dimension = emb != nil ? 512 : 0  // NLEmbedding uses 512-dim vectors
+    self.cacheURL = cacheURL
+    if let cacheURL, let data = try? Data(contentsOf: cacheURL),
+       let decoded = try? JSONDecoder().decode([String: [Double]].self, from: data) {
+      self.textCache = decoded
+    }
   }
 
   /// Whether the embedding model is available.
@@ -34,15 +53,27 @@ public actor EmbeddingIndex {
 
   /// Compute embeddings for all entries. Call once at startup.
   /// For each entry, embeds: "{symbolName} {first comment/snippet line}"
+  /// Uses the on-disk cache when present; falls through to NLEmbedding for cache misses.
   public func buildIndex(from entries: [IndexEntry]) {
     guard let embedding else { return }
 
+    var hits = 0
     for (i, entry) in entries.enumerated() {
       let text = embeddableText(for: entry)
+      if let cached = textCache[text] {
+        vectors[i] = cached
+        hits += 1
+        continue
+      }
       if let vector = embedding.vector(for: text) {
-        vectors[i] = Array(vector)
+        let arr = Array(vector)
+        vectors[i] = arr
+        textCache[text] = arr
+        cacheDirty = true
       }
     }
+    _ = hits  // cache-hit count — available if we want to log
+    persistCacheIfDirty()
   }
 
   /// Add entries for incremental update.
@@ -50,10 +81,29 @@ public actor EmbeddingIndex {
     guard let embedding else { return }
     for (i, entry) in entries {
       let text = embeddableText(for: entry)
+      if let cached = textCache[text] {
+        vectors[i] = cached
+        continue
+      }
       if let vector = embedding.vector(for: text) {
-        vectors[i] = Array(vector)
+        let arr = Array(vector)
+        vectors[i] = arr
+        textCache[text] = arr
+        cacheDirty = true
       }
     }
+    persistCacheIfDirty()
+  }
+
+  /// Serialize the text→vector cache to the configured URL (if set + dirty).
+  private func persistCacheIfDirty() {
+    guard cacheDirty, let cacheURL else { return }
+    let encoder = JSONEncoder()
+    guard let data = try? encoder.encode(textCache) else { return }
+    let dir = cacheURL.deletingLastPathComponent()
+    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+    try? data.write(to: cacheURL)
+    cacheDirty = false
   }
 
   // MARK: - Query

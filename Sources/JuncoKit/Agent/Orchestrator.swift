@@ -44,7 +44,7 @@ public actor Orchestrator {
   private var lspStarted = false
 
   private var projectIndex: [IndexEntry] = []
-  private let embeddingIndex = EmbeddingIndex()
+  private let embeddingIndex: EmbeddingIndex
   private var referenceGraph: ReferenceGraph = .empty
   private var projectSnapshot: ProjectSnapshot = .empty
   private var needsReindex = true
@@ -61,6 +61,10 @@ public actor Orchestrator {
   public init(adapter: any LLMAdapter, workingDirectory: String) {
     self.adapter = adapter
     self.workingDirectory = workingDirectory
+    let embeddingCache = URL(fileURLWithPath: workingDirectory)
+      .appendingPathComponent(Config.projectDirName)
+      .appendingPathComponent("embedding_cache.json")
+    self.embeddingIndex = EmbeddingIndex(cacheURL: embeddingCache)
     self.shell = SafeShell(workingDirectory: workingDirectory)
     self.swiftValidator = SwiftValidator()
     self.validatorRegistry = ValidatorRegistry.default()

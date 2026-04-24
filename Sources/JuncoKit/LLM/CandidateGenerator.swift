@@ -77,6 +77,14 @@ public struct CandidateGenerator: Sendable {
           prompt: prompt, system: system, as: type, options: options
         )
         let code = extract(value)
+        // AFM occasionally emits an empty string under greedy structured decoding
+        // (observed 45s 0-byte responses on simple create-hello prompts). Treat as
+        // a failed candidate so the loop can try the next slot instead of feeding
+        // an empty file into downstream CVF/fix paths.
+        if code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          lastError = LLMError.generationFailed("empty candidate output at slot \(index)")
+          continue
+        }
         let result = await evaluate(code: code, filePath: filePath)
         candidates.append((value, result))
 

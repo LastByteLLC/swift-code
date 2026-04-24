@@ -2250,6 +2250,9 @@ public actor Orchestrator {
           as: CodeFragment.self,
           options: GenerationProfile.codeGen(maxTokens: 500).options()
         )
+        // Empty AFM output (observed under greedy structured decoding) would splice a
+        // blank into the file and leave CVF spinning.
+        if fixed.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
         content = errorExtractor.splice(original: content, region: region, fix: fixed.content)
       } else {
         debug("Full retry \(retries) for \(filePath): \(error)")
@@ -2261,6 +2264,7 @@ public actor Orchestrator {
           as: CreateParams.self,
           options: GenerationProfile.codeGen(maxTokens: 1200).options()
         )
+        if fixed.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { break }
         content = fixed.content
       }
       content = linter.lint(content: content, filePath: filePath)

@@ -55,6 +55,14 @@ struct GenerationProfileTests {
     #expect(opts.temperature == 0.2)
   }
 
+  @Test("codeGen defaults to greedy sampling")
+  func codeGenGreedyDefault() {
+    // Greedy decoding reduces AFM stochasticity on enum+switch cases;
+    // Phase E measured +20pp on create-traffic-enum with no regressions.
+    let opts = GenerationProfile.codeGen(maxTokens: 2000).options()
+    #expect(opts.sampling == .greedy)
+  }
+
   @Test("codeGen honors explicit temperature")
   func codeGenCustomTemperature() {
     let opts = GenerationProfile.codeGen(maxTokens: 1500, temperature: 0.5).options()

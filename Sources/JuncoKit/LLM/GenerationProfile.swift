@@ -93,7 +93,7 @@ public enum GenerationProfile: Sendable {
       return LLMGenerationOptions(
         maximumResponseTokens: override?.maxTokens ?? maxTokens,
         temperature: override?.temperature ?? temperature,
-        sampling: override?.sampling()
+        sampling: override?.sampling() ?? .greedy
       )
 
     case .candidate(let index, let temperature):

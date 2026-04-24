@@ -28,6 +28,10 @@ public struct MetaConfig: Sendable, Codable {
   // Tools / generation
   public var bashTimeout: TimeInterval?
   public var maxValidationRetries: Int?
+  /// E6: per-file-role retry caps keyed by `MicroSkill.inferFileRole` output
+  /// ("view" / "viewmodel" / "service" / "model" / "app" / "test" / "unknown").
+  /// When a role is in this dict, its value overrides `maxValidationRetries`.
+  public var validationRetriesByRole: [String: Int]?
   public var maxCVFCyclesView: Int?
   public var candidateCount: Int?
   public var candidateTemperature: Double?

@@ -2237,7 +2237,8 @@ public actor Orchestrator {
     let taskHint = TokenBudget.truncate(memory.query, toTokens: 60)
 
     var retries = 0
-    while retries < Config.maxValidationRetries {
+    let retryCap = Self.roleAwareRetryCap(for: filePath)
+    while retries < retryCap {
       let feedback = swiftValidator.feedbackForLLM(code: content, filePath: filePath)
       guard let error = feedback else { break }
       retries += 1
@@ -2613,6 +2614,18 @@ public enum OrchestratorError: Error, Sendable {
 extension Orchestrator {
   /// After destructive eval rewinds, force the next run() to re-read disk.
   public func invalidateProjectState() { needsReindex = true }
+
+  /// E6: per-file-role retry cap. Checks MetaConfig.validationRetriesByRole first, then
+  /// falls back to Config.maxValidationRetries. Env-var fallback (JUNCO_RETRIES_<ROLE>)
+  /// retained for sessions that can't use a MetaConfig overlay.
+  fileprivate static func roleAwareRetryCap(for filePath: String) -> Int {
+    let role = filePath.hasSuffix(".swift") ? MicroSkill.inferFileRole(filePath) : "unknown"
+    if let s = ProcessInfo.processInfo.environment["JUNCO_RETRIES_\(role.uppercased())"],
+       let v = Int(s) {
+      return max(0, min(10, v))
+    }
+    return Config.maxValidationRetries(forRole: role)
+  }
 
   /// E7: two-phase role gate via env.
   fileprivate static func shouldUseTwoPhase(role: String) -> Bool {

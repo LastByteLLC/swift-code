@@ -41,6 +41,15 @@ public enum Config {
   /// Maximum retries when code validation (Swift) fails.
   public static var maxValidationRetries: Int { MetaConfig.shared.maxValidationRetries ?? 2 }
 
+  /// E6: per-file-role override. When the fileRole is in `validationRetriesByRole`,
+  /// its value (clamped to 0…10) wins; otherwise falls back to the global cap.
+  public static func maxValidationRetries(forRole role: String) -> Int {
+    if let overlay = MetaConfig.shared.validationRetriesByRole, let v = overlay[role] {
+      return max(0, min(10, v))
+    }
+    return maxValidationRetries
+  }
+
   /// Maximum CVF (compile-verify-fix) cycles for view files (SwiftUI bodies are harder).
   public static var maxCVFCyclesView: Int { MetaConfig.shared.maxCVFCyclesView ?? 3 }
 

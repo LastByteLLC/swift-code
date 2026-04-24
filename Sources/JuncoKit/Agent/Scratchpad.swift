@@ -5,7 +5,7 @@ public struct Scratchpad: Sendable {
   private let path: String
 
   public init(projectDirectory: String) {
-    let dir = (projectDirectory as NSString).appendingPathComponent("Config.projectDirName")
+    let dir = (projectDirectory as NSString).appendingPathComponent(Config.projectDirName)
     try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     self.path = (dir as NSString).appendingPathComponent("scratchpad.json")
   }

@@ -1680,14 +1680,7 @@ public actor Orchestrator {
         if stepTrace { FileHandle.standardError.write(Data("[ORCH-create] \(m)\n".utf8)) }
       }
       trace("start TreeSitterRepair")
-      // TreeSitterRepair: deterministic structural fixes before compiler check
-      if target.hasSuffix(".swift") && !content.isEmpty {
-        let (repaired, repairFixes) = treeSitterRepair.repair(content)
-        if !repairFixes.isEmpty {
-          debug("TreeSitterRepair: \(repairFixes.joined(separator: ", "))")
-          content = repaired
-        }
-      }
+      content = applyRepair(to: content, filePath: target, logPrefix: "create")
       trace("TreeSitterRepair done")
 
       // CVF + validation: skip Package.swift (PackageDescription unavailable to plain swiftc)
@@ -1772,6 +1765,9 @@ public actor Orchestrator {
       memory.trackCall(estimatedTokens: TokenBudget.execute.total)
       var newContent = try await adapter.generate(prompt: task.specification, system: system)
       newContent = linter.cleanPlainTextOutput(newContent, filePath: target)
+
+      // Pass 7 and siblings: edit path needs TreeSitterRepair too (fix-compile-error).
+      newContent = applyRepair(to: newContent, filePath: target, logPrefix: "edit")
 
       // Validate
       let validated = try await validateAndFix(content: newContent, filePath: target, memory: &memory)
@@ -2614,6 +2610,16 @@ public enum OrchestratorError: Error, Sendable {
 extension Orchestrator {
   /// After destructive eval rewinds, force the next run() to re-read disk.
   public func invalidateProjectState() { needsReindex = true }
+
+  /// Shared entry point for TreeSitterRepair on a .swift file. No-op for empty or non-Swift
+  /// content. Called from both the create path (before CVF) and the edit path (before
+  /// validateAndFix) so Pass 7's structural moves benefit edits too.
+  fileprivate func applyRepair(to content: String, filePath: String, logPrefix: String) -> String {
+    guard filePath.hasSuffix(".swift"), !content.isEmpty else { return content }
+    let (repaired, fixes) = treeSitterRepair.repair(content)
+    if !fixes.isEmpty { debug("TreeSitterRepair (\(logPrefix)): \(fixes.joined(separator: ", "))") }
+    return repaired
+  }
 
   /// E6: per-file-role retry cap. Checks MetaConfig.validationRetriesByRole first, then
   /// falls back to Config.maxValidationRetries. Env-var fallback (JUNCO_RETRIES_<ROLE>)

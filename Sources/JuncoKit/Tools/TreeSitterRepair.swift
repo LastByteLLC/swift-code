@@ -65,6 +65,13 @@ public struct TreeSitterRepair: Sendable {
       current = keyed.code
     }
 
+    // Pass 7: Move free functions using `self` with enum-case switch patterns inside their enum
+    let pulledSelf = pullSelfUsingFreeFuncs(current)
+    if pulledSelf.moved > 0 {
+      fixes.append("pulled \(pulledSelf.moved) self-using free func(s) inside enum")
+      current = pulledSelf.code
+    }
+
     return (current, fixes)
   }
 
@@ -523,6 +530,166 @@ public struct TreeSitterRepair: Sendable {
       result.replaceSubrange(full, with: replacement)
     }
     return result
+  }
+
+  // MARK: - Pass 7: Move `self`-using free funcs into their enum
+
+  /// AFM's under-reading of fix-compile prompts: given "make advance() an instance method
+  /// on Light that switches on self," AFM sometimes changes the switch expression to
+  /// `switch self` but leaves the function at file scope, so `self` is now invalid.
+  /// This pass detects free functions whose body uses `self` and matches exactly one
+  /// enum's case set (via `.caseName` patterns), and moves the function inside that enum.
+  ///
+  /// Complement of Pass 5: Pass 5 moves and rewrites `EnumName.<nonCase>` → `self`;
+  /// Pass 7 moves functions that are *already* using `self` but live outside any type.
+  public func pullSelfUsingFreeFuncs(_ code: String) -> (code: String, moved: Int) {
+    let lines = code.components(separatedBy: "\n")
+    guard !lines.isEmpty else { return (code, 0) }
+
+    struct EnumInfo {
+      let name: String
+      let cases: Set<String>
+      let startRow: Int
+      let endRow: Int
+    }
+    struct FuncRange {
+      let name: String
+      let startRow: Int
+      let endRow: Int
+      let text: String
+    }
+
+    let enumHeadPattern = #"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?enum\s+(\w+)\b"#
+    // Zero-parameter free function only — keeps this pass from mis-moving helpers.
+    let funcHeadPattern = #"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+|static\s+)?func\s+(\w+)\s*\(\s*\)"#
+    guard let enumRegex = try? NSRegularExpression(pattern: enumHeadPattern),
+          let funcRegex = try? NSRegularExpression(pattern: funcHeadPattern) else { return (code, 0) }
+
+    var enums: [EnumInfo] = []
+    var topFuncs: [FuncRange] = []
+    var i = 0
+    while i < lines.count {
+      let line = lines[i]
+      let nsRange = NSRange(line.startIndex..., in: line)
+      if let m = enumRegex.firstMatch(in: line, range: nsRange),
+         m.numberOfRanges >= 2, let nameRange = Range(m.range(at: 1), in: line),
+         line.contains("{") {
+        let name = String(line[nameRange])
+        if let endRow = findMatchingBrace(lines: lines, openRow: i) {
+          let body = endRow > i ? lines[(i+1)..<endRow].joined(separator: "\n") : lines[i]
+          let cases = collectEnumCaseNames(body)
+          enums.append(EnumInfo(name: name, cases: cases, startRow: i, endRow: endRow))
+          i = endRow + 1
+          continue
+        }
+      }
+      if let m = funcRegex.firstMatch(in: line, range: nsRange),
+         m.numberOfRanges >= 2, let nameRange = Range(m.range(at: 1), in: line),
+         line.contains("{") {
+        let name = String(line[nameRange])
+        if let endRow = findMatchingBrace(lines: lines, openRow: i) {
+          let text = lines[i...endRow].joined(separator: "\n")
+          topFuncs.append(FuncRange(name: name, startRow: i, endRow: endRow, text: text))
+          i = endRow + 1
+          continue
+        }
+      }
+      i += 1
+    }
+
+    guard !enums.isEmpty, !topFuncs.isEmpty else { return (code, 0) }
+
+    struct FuncMove {
+      let fnStartRow: Int
+      let fnEndRow: Int
+      let enumIndex: Int
+      let text: String
+    }
+    var moves: [FuncMove] = []
+
+    for fn in topFuncs {
+      // Must actually use `self` as an identifier (not `selfX`, not inside a string).
+      guard bodyUsesSelf(fn.text) else { continue }
+      // Collect `.caseName` patterns that look like enum-case references inside switch arms.
+      let referencedCases = collectDotCasePatterns(fn.text)
+      guard !referencedCases.isEmpty else { continue }
+
+      // Find enums (declared BEFORE this function) whose case set is a superset of the
+      // referenced patterns. If exactly one matches, that's the target.
+      var candidates: [Int] = []
+      for (eIdx, e) in enums.enumerated() where e.endRow < fn.startRow {
+        if referencedCases.isSubset(of: e.cases) && !e.cases.isEmpty {
+          candidates.append(eIdx)
+        }
+      }
+      guard candidates.count == 1 else { continue }
+      moves.append(FuncMove(
+        fnStartRow: fn.startRow, fnEndRow: fn.endRow,
+        enumIndex: candidates[0], text: fn.text
+      ))
+    }
+
+    guard !moves.isEmpty else { return (code, 0) }
+
+    let skipRows: Set<Int> = Set(moves.flatMap { Array($0.fnStartRow ... $0.fnEndRow) })
+    var insertsAtEnumEnd: [Int: [String]] = [:]
+    for m in moves {
+      insertsAtEnumEnd[enums[m.enumIndex].endRow, default: []].append(m.text)
+    }
+
+    var output: [String] = []
+    for (idx, line) in lines.enumerated() {
+      if skipRows.contains(idx) { continue }
+      if let inserts = insertsAtEnumEnd[idx] {
+        let outerIndent = String(line.prefix { $0 == " " || $0 == "\t" })
+        let methodIndent = outerIndent + "  "
+        for fnText in inserts {
+          output.append("")
+          for fnLine in fnText.components(separatedBy: "\n") {
+            output.append(fnLine.isEmpty ? fnLine : methodIndent + fnLine)
+          }
+        }
+      }
+      output.append(line)
+    }
+    return (output.joined(separator: "\n"), moves.count)
+  }
+
+  /// Returns true if `text` contains `self` as a bare identifier (not `selfX`, not inside strings).
+  private func bodyUsesSelf(_ text: String) -> Bool {
+    // Strip string literals first to avoid false positives.
+    var stripped = ""
+    stripped.reserveCapacity(text.count)
+    var inString = false
+    var prev: Character = "\0"
+    for ch in text {
+      if ch == "\"" && prev != "\\" { inString.toggle(); prev = ch; continue }
+      if !inString { stripped.append(ch) }
+      prev = ch
+    }
+    let pattern = #"\bself\b"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+    let nsRange = NSRange(stripped.startIndex..., in: stripped)
+    return regex.firstMatch(in: stripped, range: nsRange) != nil
+  }
+
+  /// Collect identifiers appearing after a lone `.` — `.red`, `.green` — typical of
+  /// enum-case references inside `switch self`. Skips method chains like `x.foo()`.
+  private func collectDotCasePatterns(_ text: String) -> Set<String> {
+    var out: Set<String> = []
+    // Lookbehind: preceded by whitespace, `(`, `,`, `:`, `[`, `=`, `?`, `|`, newline, or start —
+    // *not* an identifier character (which would make it a method access).
+    let pattern = #"(?:^|[\s(,:\[=?|])\.([a-zA-Z_]\w*)\b"#
+    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) else {
+      return out
+    }
+    let nsText = text as NSString
+    let fullRange = NSRange(location: 0, length: nsText.length)
+    for m in regex.matches(in: text, range: fullRange) {
+      guard m.numberOfRanges >= 2 else { continue }
+      out.insert(nsText.substring(with: m.range(at: 1)))
+    }
+    return out
   }
 
   // MARK: - Pass 6: Add id: \.self to ForEach/List over Primitive Arrays

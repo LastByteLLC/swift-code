@@ -514,4 +514,87 @@ struct TreeSitterRepairTests {
     #expect(!fixes.contains(where: { $0.contains("id: \\.self") }))
     #expect(fixed.contains("ForEach(items)"))
   }
+
+  // MARK: - Pass 7: move free function using `self` into its enum
+
+  @Test("Free function with `switch self` over enum-case returns is moved inside enum")
+  func pullFreeSelfSwitchIntoEnum() {
+    let code = """
+      import Foundation
+
+      enum Light {
+          case red
+          case yellow
+          case green
+      }
+
+      func advance() -> Light {
+          switch self {
+          case .red: return .green
+          case .yellow: return .red
+          case .green: return .yellow
+          }
+      }
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(fixes.contains(where: { $0.contains("pulled") }))
+    // Free function should be gone from top level
+    let topLevelSelfFunc = fixed.range(of: #"(?m)^func\s+advance\s*\("#, options: .regularExpression)
+    #expect(topLevelSelfFunc == nil)
+    // advance() should now exist inside the enum body — the switch self + .red/.yellow/.green payload survives
+    #expect(fixed.contains("switch self"))
+    #expect(fixed.contains(".red"))
+    #expect(fixed.contains(".yellow"))
+    #expect(fixed.contains(".green"))
+  }
+
+  @Test("Free function using `self` but unrelated to any enum is left alone")
+  func doesNotPullUnrelatedSelfFunc() {
+    let code = """
+      struct Counter { var n: Int }
+
+      enum Other {
+          case a
+          case b
+      }
+
+      func tally() -> Int {
+          return self.count
+      }
+      """
+    // No enum matches the tally() body contents, so nothing should move.
+    let (fixed, fixes) = repair.repair(code)
+    #expect(!fixes.contains(where: { $0.contains("pulled") }))
+    #expect(fixed.contains("func tally"))
+  }
+
+  @Test("Free function using `self` with enum-case returns picks the right enum when multiple exist")
+  func picksRightEnumByCaseMatch() {
+    let code = """
+      enum Color {
+          case red
+          case blue
+      }
+
+      enum Shape {
+          case circle
+          case square
+      }
+
+      func next() -> Shape {
+          switch self {
+          case .circle: return .square
+          case .square: return .circle
+          }
+      }
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(fixes.contains(where: { $0.contains("pulled") }))
+    // The function should be inside Shape, not Color
+    let shapeIdx = fixed.range(of: "enum Shape {")
+    let colorIdx = fixed.range(of: "enum Color {")
+    let funcIdx = fixed.range(of: "switch self")
+    #expect(shapeIdx != nil && colorIdx != nil && funcIdx != nil)
+    if let s = shapeIdx, let f = funcIdx { #expect(f.lowerBound > s.lowerBound) }
+  }
 }

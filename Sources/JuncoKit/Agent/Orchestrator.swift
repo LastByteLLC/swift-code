@@ -528,7 +528,8 @@ public actor Orchestrator {
       return domainExtensions.contains(ext)
     }
 
-    if filesWereModified && !modifiedDomainFiles.isEmpty {
+    let skipBuildVerify = ProcessInfo.processInfo.environment["JUNCO_SKIP_BUILD_FIX"] == "1"
+    if filesWereModified && !modifiedDomainFiles.isEmpty && !skipBuildVerify {
       // Start LSP lazily on first edit (only for Swift projects)
       if domain.kind == .swift && !lspStarted {
         lspStarted = await lspClient.start()

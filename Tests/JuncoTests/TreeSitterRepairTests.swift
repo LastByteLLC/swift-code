@@ -330,6 +330,35 @@ struct TreeSitterRepairTests {
     #expect(moved == 0)
   }
 
+  @Test("Local-var pattern (TrafficLight.red to a local var) is not disturbed")
+  func localVarPatternIsLeftAlone() {
+    // Phase I-v2 R1: AFM produces a free function that assigns TrafficLight.red
+    // to a local var and switches on the var. `.red` is a case ref, not a non-case
+    // hallucination — Pass 5 must leave it alone. repair() must be an identity here.
+    let code = """
+      import Foundation
+
+      enum TrafficLight: String {
+          case red
+          case yellow
+          case green
+      }
+
+      func next() -> TrafficLight {
+          var currentLight = TrafficLight.red
+          switch currentLight {
+          case .red: currentLight = .yellow
+          case .yellow: currentLight = .green
+          case .green: currentLight = .red
+          }
+          return currentLight
+      }
+      """
+    let (fixed, moved) = repair.pullEnumExternalMethods(code)
+    #expect(moved == 0)
+    #expect(fixed == code)
+  }
+
   @Test("Clean enum method already inside is not disturbed")
   func noMoveWhenMethodAlreadyInside() {
     let code = """

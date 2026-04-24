@@ -261,4 +261,114 @@ struct TreeSitterRepairTests {
     #expect(result.isEmpty)
     #expect(fixes.isEmpty)
   }
+
+  // MARK: - Pass 5: Pull orphaned enum methods inside
+
+  @Test("Free function using EnumName.hallucinated is moved inside enum")
+  func pullOrphanMethodWithHallucinatedStatic() {
+    // The exact AFM failure mode observed in Phase E create-traffic-enum:
+    // method emitted outside the enum, referencing a non-existent `TrafficLight.current`.
+    let code = """
+      import Foundation
+
+      enum TrafficLight: String {
+          case red = "Red"
+          case yellow = "Yellow"
+          case green = "Green"
+      }
+
+      func next() -> TrafficLight {
+          switch TrafficLight.current {
+          case .red:
+              return .green
+          case .green:
+              return .yellow
+          case .yellow:
+              return .red
+          }
+      }
+      """
+    let (fixed, moved) = repair.pullEnumExternalMethods(code)
+    #expect(moved == 1)
+    // Free function is gone from top level
+    #expect(!fixed.contains("\nfunc next()"))
+    // Its body is now inside the enum, with TrafficLight.current rewritten to self
+    #expect(fixed.contains("switch self"))
+    #expect(!fixed.contains("TrafficLight.current"))
+    // Enum body still has its cases
+    #expect(fixed.contains("case red = \"Red\""))
+  }
+
+  @Test("Free function with unrelated EnumName case references is unchanged")
+  func noMoveWhenOnlyCaseRefs() {
+    let code = """
+      enum TrafficLight { case red, yellow, green }
+
+      func defaultLight() -> TrafficLight {
+          return TrafficLight.red
+      }
+      """
+    let (fixed, moved) = repair.pullEnumExternalMethods(code)
+    #expect(moved == 0)
+    #expect(fixed == code)
+  }
+
+  @Test("Free function taking enum as parameter is not moved")
+  func noMoveWhenHasParameter() {
+    let code = """
+      enum Direction { case north, south }
+
+      func describe(_ d: Direction) -> String {
+          switch Direction.north {
+          case .north: return "N"
+          case .south: return "S"
+          }
+      }
+      """
+    let (_, moved) = repair.pullEnumExternalMethods(code)
+    // Has a parameter — skip, as a safety bound.
+    #expect(moved == 0)
+  }
+
+  @Test("Clean enum method already inside is not disturbed")
+  func noMoveWhenMethodAlreadyInside() {
+    let code = """
+      enum TrafficLight {
+          case red, yellow, green
+          func next() -> TrafficLight {
+              switch self {
+              case .red: return .green
+              case .yellow: return .red
+              case .green: return .yellow
+              }
+          }
+      }
+      """
+    let (fixed, moved) = repair.pullEnumExternalMethods(code)
+    #expect(moved == 0)
+    #expect(fixed == code)
+  }
+
+  @Test("repair() integrates Pass 5 with other passes")
+  func fullRepairIncludesEnumPull() {
+    let code = """
+      ```swift
+      enum TrafficLight {
+          case red, yellow, green
+      }
+
+      func next() -> TrafficLight {
+          switch TrafficLight.now {
+          case .red: return .green
+          case .yellow: return .red
+          case .green: return .yellow
+          }
+      }
+      ```
+      """
+    let (fixed, fixes) = repair.repair(code)
+    #expect(fixes.contains(where: { $0.contains("enum method") }))
+    #expect(!fixed.contains("TrafficLight.now"))
+    #expect(fixed.contains("switch self"))
+  }
 }

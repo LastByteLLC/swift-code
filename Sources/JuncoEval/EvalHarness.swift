@@ -728,6 +728,56 @@ struct EvalHarness {
         "Should find and fix 'termnial' → 'terminal'",
         "Should not make other changes"
       ]
+    ),
+
+    // Tier 1: trivial — struct with two Double properties (basic syntax)
+    EvalCase(
+      name: "create-point-struct",
+      query: "Create Sources/Point.swift containing a struct Point with two Double properties named x and y, and an init that takes both.",
+      referencedFiles: [],
+      expectedMode: .build,
+      destructive: true,
+      setup: nil,
+      qualityCriteria: [
+        "Should create Sources/Point.swift",
+        "Should declare `struct Point`",
+        "Should have stored properties x: Double and y: Double",
+        "File should compile under swiftc -typecheck"
+      ]
+    ),
+
+    // Tier 2: function with parameters + return (signatures + Foundation usage)
+    EvalCase(
+      name: "create-distance-func",
+      query: "Create Sources/Distance.swift containing a top-level function `distance(from:to:)` that takes two `(Double, Double)` tuples and returns their Euclidean distance as Double. Use Foundation.",
+      referencedFiles: [],
+      expectedMode: .build,
+      destructive: true,
+      setup: nil,
+      qualityCriteria: [
+        "Should create Sources/Distance.swift",
+        "Should import Foundation",
+        "Should declare func distance(from:to:)",
+        "Should compute Euclidean distance: sqrt(dx*dx + dy*dy)",
+        "File should compile under swiftc -typecheck"
+      ]
+    ),
+
+    // Tier 3: enum with raw values + method (enum syntax + switch)
+    EvalCase(
+      name: "create-traffic-enum",
+      query: "Create Sources/TrafficLight.swift containing an enum TrafficLight: String with cases red, yellow, green, and a method `next() -> TrafficLight` that cycles red→green→yellow→red.",
+      referencedFiles: [],
+      expectedMode: .build,
+      destructive: true,
+      setup: nil,
+      qualityCriteria: [
+        "Should create Sources/TrafficLight.swift",
+        "Should declare enum TrafficLight: String",
+        "Should have cases red, yellow, green",
+        "Should have method next() -> TrafficLight",
+        "File should compile under swiftc -typecheck"
+      ]
     )
   ]
 

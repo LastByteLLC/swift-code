@@ -2607,6 +2607,13 @@ public enum OrchestratorError: Error, Sendable {
   case toolFailed(String)
 }
 
+// MARK: - Extensions outside the actor body (kept out of type_body_length)
+
+extension Orchestrator {
+  /// After destructive eval rewinds, force the next run() to re-read disk.
+  public func invalidateProjectState() { needsReindex = true }
+}
+
 /// Thread-safe flag for cross-actor communication (FileWatcher → Orchestrator).
 /// Thread-safe atomic boolean flag. Used for cross-boundary signaling.
 public final class ReindexFlag: @unchecked Sendable {

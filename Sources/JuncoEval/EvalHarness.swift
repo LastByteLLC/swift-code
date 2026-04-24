@@ -1091,6 +1091,14 @@ struct EvalHarness {
       _ = try? await shell.execute("git stash pop --quiet 2>/dev/null")
     }
 
+    // Force the Orchestrator to re-read disk before the next case. Destructive
+    // runs update projectSnapshot.models when they create types; after the git
+    // rewind above, those types no longer exist on disk but they still sit in
+    // the cached snapshot, which causes `removeDuplicateTypes` to strip the
+    // re-generated type in a subsequent replicate (observed on
+    // create-traffic-enum across rounds).
+    await orchestrator.invalidateProjectState()
+
     return result
   }
 

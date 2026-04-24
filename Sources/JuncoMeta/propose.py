@@ -109,6 +109,45 @@ CATALOG: list[Candidate] = [
         env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1"},
         meta_config={"maxObservations": 1, "maxErrors": 1},
     ),
+    # Template-routing hypotheses (Phase K) — service template is off by default
+    # after commit 6906938; these candidates measure whether the view template
+    # should follow and whether the earlier apparent service-template win was noise.
+    Candidate(
+        label="view-template-off",
+        description="Disable the view template (default-on). Measures at N=10 whether it beats AFM's direct SwiftUI generation.",
+        env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1", "JUNCO_DISABLE_TEMPLATES": "view"},
+        meta_config={},
+    ),
+    Candidate(
+        label="service-template-on",
+        description="Re-enable the default-disabled service template. Control for the 83% ship finding — should regress.",
+        env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1", "JUNCO_ENABLE_TEMPLATES": "service"},
+        meta_config={},
+    ),
+    Candidate(
+        label="all-templates-off",
+        description="All templates off — stress-test how much AFM alone can do at N=10.",
+        env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1", "JUNCO_DISABLE_TEMPLATES": "1"},
+        meta_config={},
+    ),
+    Candidate(
+        label="temp-0",
+        description="codeGen temperature=0 (fully deterministic, stricter than default 0.2).",
+        env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1"},
+        meta_config={"profileOverrides": {"codeGen": {"temperature": 0.0}}},
+    ),
+    Candidate(
+        label="temp-0.1",
+        description="codeGen temperature=0.1 — slightly less deterministic than default.",
+        env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1"},
+        meta_config={"profileOverrides": {"codeGen": {"temperature": 0.1}}},
+    ),
+    Candidate(
+        label="retries-view-0",
+        description="view role retries=0 — write template output as-is, skip CVF retries for views.",
+        env={"JUNCO_WRITE_ON_VALIDATION_FAILURE": "1"},
+        meta_config={"validationRetriesByRole": {"view": 0}},
+    ),
 ]
 
 
@@ -211,17 +250,23 @@ def pick_weakest_fixture(per_fixture: dict[str, list[int]]) -> str | None:
 
 
 def rank_candidates_for_fixture(fixture: str) -> list[Candidate]:
-    """Rule-based: map the weakest fixture to the ranked candidates to try."""
-    if "todolist" in fixture or "view" in fixture.lower():
-        return [c for c in CATALOG if c.label in ("retries-view-4", "e7-force-twophase", "candidate-5")]
-    if "todo-item" in fixture or "string-builder" in fixture:
-        return [c for c in CATALOG if c.label in ("retries-model-0", "e5-write", "candidate-5")]
-    if "network-service" in fixture:
-        return [c for c in CATALOG if c.label in ("candidate-5", "greedy-hot", "e7-force-twophase")]
-    if "fix" in fixture:
-        return [c for c in CATALOG if c.label in ("retries-model-0", "nocvf", "e5-write")]
-    # Default: full catalog minus dupes of the baseline.
-    return [c for c in CATALOG if c.label != "e5-write"]
+    """Rule-based: map the weakest fixture to the ranked candidates.
+    Order in the label tuple IS the iteration order — cheapest / most-likely first."""
+    catalog_by_label = {c.label: c for c in CATALOG}
+    def pick(labels):
+        return [catalog_by_label[lbl] for lbl in labels if lbl in catalog_by_label]
+    f = fixture.lower()
+    if "todolist" in f or ("view" in f and "network" not in f):
+        return pick(["view-template-off", "retries-view-0", "retries-view-4",
+                     "candidate-5", "e7-force-twophase"])
+    if "todo-item" in f or "string-builder" in f:
+        return pick(["retries-model-0", "temp-0", "temp-0.1", "candidate-5"])
+    if "network-service" in f:
+        return pick(["temp-0", "temp-0.1", "candidate-5", "candidate-7", "greedy-hot"])
+    if "fix" in f:
+        return pick(["retries-model-0", "nocvf", "temp-0"])
+    # Default: a broad sweep in priority order.
+    return pick(["temp-0", "candidate-5", "nocvf", "e7-force-twophase", "lean-memory"])
 
 
 def append_history(entry: str) -> None:

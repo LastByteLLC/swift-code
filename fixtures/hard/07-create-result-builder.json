@@ -11,6 +11,8 @@
   "checks": [
     {"kind": "compiles"},
     {"kind": "hasType", "name": "StringListBuilder", "category": "struct"},
-    {"kind": "hasMember", "on": "StringListBuilder", "name": "buildBlock", "member": "func"}
+    {"kind": "hasMember", "on": "StringListBuilder", "name": "buildBlock", "member": "func"},
+    {"kind": "referenceSimilarity", "against": "source", "minSimilarity": 0.5,
+     "reference": "@resultBuilder\nstruct StringListBuilder {\n    static func buildBlock(_ components: String...) -> [String] {\n        Array(components)\n    }\n}\n"}
   ]
 }

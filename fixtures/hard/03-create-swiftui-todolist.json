@@ -13,6 +13,8 @@
     {"kind": "compiles"},
     {"kind": "hasType", "name": "TodoListView", "category": "struct", "conformsTo": ["View"]},
     {"kind": "hasMember", "on": "TodoListView", "name": "items", "member": "property"},
-    {"kind": "hasMember", "on": "TodoListView", "name": "body", "member": "computed"}
+    {"kind": "hasMember", "on": "TodoListView", "name": "body", "member": "computed"},
+    {"kind": "referenceSimilarity", "against": "source", "minSimilarity": 0.5,
+     "reference": "import SwiftUI\n\nstruct TodoListView: View {\n    @State private var items: [String] = [\"Buy milk\", \"Walk dog\"]\n\n    var body: some View {\n        NavigationStack {\n            List {\n                ForEach(items, id: \\.self) { item in\n                    Text(item)\n                }\n            }\n        }\n    }\n}\n"}
   ]
 }

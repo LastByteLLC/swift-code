@@ -13,6 +13,8 @@
     {"kind": "compiles"},
     {"kind": "hasType", "name": "User", "category": "struct", "conformsTo": ["Codable"]},
     {"kind": "hasType", "name": "NetworkService", "category": "struct"},
-    {"kind": "hasMember", "on": "NetworkService", "name": "fetchUser", "member": "func", "returns": "User"}
+    {"kind": "hasMember", "on": "NetworkService", "name": "fetchUser", "member": "func", "returns": "User"},
+    {"kind": "referenceSimilarity", "against": "source", "minSimilarity": 0.5,
+     "reference": "import Foundation\n\nstruct User: Codable {\n    let id: Int\n    let name: String\n}\n\nstruct NetworkService {\n    func fetchUser(id: Int) async throws -> User {\n        let url = URL(string: \"https://example.com/users/\\(id)\")!\n        let (data, _) = try await URLSession.shared.data(from: url)\n        return try JSONDecoder().decode(User.self, from: data)\n    }\n}\n"}
   ]
 }

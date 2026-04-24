@@ -344,9 +344,20 @@ public struct FixtureChecker: Sendable {
   }
 
   private func checkReferenceSimilarity(check: SubCheck, answer: String?, source: String?) -> SubCheckResult {
-    let text = answer ?? source ?? ""
+    // Target selection: explicit `against`, else fall back to answer-or-source.
+    // "source" is the right target for create-* fixtures (answer is a short
+    // "[create] ok: …" receipt, not the generated Swift).
+    let text: String
+    switch check.against?.lowercased() {
+    case "source": text = source ?? ""
+    case "answer": text = answer ?? ""
+    default:       text = answer ?? source ?? ""
+    }
     guard let reference = check.reference, let threshold = check.minSimilarity else {
       return SubCheckResult(label: check.label, passed: false, detail: "missing reference/threshold")
+    }
+    guard !text.isEmpty else {
+      return SubCheckResult(label: check.label, passed: false, detail: "no text to score")
     }
     guard let embedder = NLEmbedding.sentenceEmbedding(for: .english),
           let a = embedder.vector(for: text),
@@ -357,10 +368,10 @@ public struct FixtureChecker: Sendable {
     for i in 0..<min(a.count, b.count) { dot += a[i] * b[i]; na += a[i] * a[i]; nb += b[i] * b[i] }
     let sim = (na > 0 && nb > 0) ? dot / (na.squareRoot() * nb.squareRoot()) : 0
     let passed = sim >= threshold
-    return SubCheckResult(
-      label: check.label, passed: passed,
-      detail: passed ? nil : String(format: "sim=%.2f < %.2f", sim, threshold)
-    )
+    // Always emit the score so the proposer can see movement, not just pass/fail.
+    let cmp = passed ? "≥" : "<"
+    let detail = String(format: "sim=%.2f %@ %.2f", sim, cmp, threshold)
+    return SubCheckResult(label: check.label, passed: passed, detail: detail)
   }
 
   // MARK: - AST helpers

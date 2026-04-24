@@ -16,6 +16,8 @@
     {"kind": "compiles"},
     {"kind": "hasType", "name": "Light", "category": "enum"},
     {"kind": "hasCase", "on": "Light", "names": ["red", "yellow", "green"]},
-    {"kind": "doesNotReferenceType", "name": "Light.current"}
+    {"kind": "doesNotReferenceType", "name": "Light.current"},
+    {"kind": "referenceSimilarity", "against": "source", "minSimilarity": 0.5,
+     "reference": "import Foundation\n\nenum Light {\n    case red\n    case yellow\n    case green\n\n    func advance() -> Light {\n        switch self {\n        case .red: return .green\n        case .yellow: return .red\n        case .green: return .yellow\n        }\n    }\n}\n"}
   ]
 }

@@ -32,6 +32,7 @@ public struct SubCheck: Sendable, Codable {
   public let maxDurationSec: Double? // durationUnder — efficiency bound
   public let expectedMode: String?   // modeIs — build/answer
   public let caseInsensitive: Bool?  // default true for answer checks
+  public let against: String?        // referenceSimilarity target: "answer" (default) or "source"
 
   public init(
     kind: String, name: String? = nil, category: String? = nil,
@@ -41,7 +42,8 @@ public struct SubCheck: Sendable, Codable {
     text: String? = nil, pattern: String? = nil, anyOf: [String]? = nil,
     minLength: Int? = nil, maxLength: Int? = nil,
     maxLlmCalls: Int? = nil, maxDurationSec: Double? = nil,
-    expectedMode: String? = nil, caseInsensitive: Bool? = nil
+    expectedMode: String? = nil, caseInsensitive: Bool? = nil,
+    against: String? = nil
   ) {
     self.kind = kind; self.name = name; self.category = category
     self.conformsTo = conformsTo; self.on = on; self.names = names
@@ -52,6 +54,7 @@ public struct SubCheck: Sendable, Codable {
     self.minLength = minLength; self.maxLength = maxLength
     self.maxLlmCalls = maxLlmCalls; self.maxDurationSec = maxDurationSec
     self.expectedMode = expectedMode; self.caseInsensitive = caseInsensitive
+    self.against = against
   }
 
   /// Short human-readable description for traces and summary reports.

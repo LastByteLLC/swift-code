@@ -16,6 +16,8 @@
     {"kind": "hasCase", "on": "TodoStatus", "names": ["pending", "inProgress", "done"]},
     {"kind": "hasType", "name": "TodoItem", "category": "struct", "conformsTo": ["Codable", "Identifiable"]},
     {"kind": "hasMember", "on": "TodoItem", "name": "isOverdue", "member": "computed"},
-    {"kind": "hasMember", "on": "TodoItem", "name": "mark", "member": "func", "returns": "TodoItem"}
+    {"kind": "hasMember", "on": "TodoItem", "name": "mark", "member": "func", "returns": "TodoItem"},
+    {"kind": "referenceSimilarity", "against": "source", "minSimilarity": 0.5,
+     "reference": "import Foundation\n\nenum TodoStatus: String, Codable {\n    case pending\n    case inProgress\n    case done\n}\n\nstruct TodoItem: Codable, Identifiable {\n    var id: UUID = UUID()\n    var title: String\n    var status: TodoStatus = .pending\n    var createdAt: Date = Date()\n    var dueAt: Date? = nil\n\n    var isOverdue: Bool {\n        guard let dueAt else { return false }\n        return dueAt < Date() && status != .done\n    }\n\n    func mark(as newStatus: TodoStatus) -> TodoItem {\n        var copy = self\n        copy.status = newStatus\n        return copy\n    }\n}\n"}
   ]
 }

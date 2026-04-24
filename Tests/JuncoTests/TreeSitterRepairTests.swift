@@ -349,6 +349,31 @@ struct TreeSitterRepairTests {
     #expect(fixed == code)
   }
 
+  @Test("Public-modifier free function is still pulled inside")
+  func pullWorksWithPublicModifier() {
+    // R3 of Phase J showed AFM emitting `public func next()` — the modifier must not
+    // hide the function from Pass 5.
+    let code = """
+      public enum TrafficLight: String {
+          case red = "red"
+          case yellow = "yellow"
+          case green = "green"
+      }
+
+      public func next() -> TrafficLight {
+          switch TrafficLight.current {
+          case .red: return .green
+          case .yellow: return .red
+          case .green: return .yellow
+          }
+      }
+      """
+    let (fixed, moved) = repair.pullEnumExternalMethods(code)
+    #expect(moved == 1)
+    #expect(fixed.contains("switch self"))
+    #expect(!fixed.contains("TrafficLight.current"))
+  }
+
   @Test("repair() integrates Pass 5 with other passes")
   func fullRepairIncludesEnumPull() {
     let code = """

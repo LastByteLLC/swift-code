@@ -332,35 +332,68 @@ public struct TreeSitterRepair: Sendable {
   /// place of `self`). Move the function inside the enum body and replace `E.<non-case>`
   /// with `self`. Runs only on functions with zero parameters — the signature that
   /// unambiguously implies an instance method, not a free helper.
+  ///
+  /// Implementation note: brace-counting over raw lines rather than the tree-sitter AST.
+  /// tree-sitter-swift misparses `public enum X: String { raw-valued cases }`, truncating
+  /// the enum body mid-case — which caused Pass 5 to miss the exact R3 Phase J failure.
   public func pullEnumExternalMethods(_ code: String) -> (code: String, moved: Int) {
-    guard let tree = parse(code), let root = tree.rootNode else { return (code, 0) }
-    let utf16: [UInt16] = Array(code.utf16)
     let lines = code.components(separatedBy: "\n")
+    guard !lines.isEmpty else { return (code, 0) }
 
     struct EnumInfo {
       let name: String
       let cases: Set<String>
       let startRow: Int
-      let endRow: Int
+      let endRow: Int  // row of closing `}`
     }
 
+    // Regex for `[modifiers] enum Name [: RawType] [conformances] {` on a single line.
+    let enumHeadPattern = #"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+)?enum\s+(\w+)\b"#
+    let funcHeadPattern = #"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+|static\s+)?func\s+(\w+)\s*\(\s*\)"#
+    guard let enumRegex = try? NSRegularExpression(pattern: enumHeadPattern),
+          let funcRegex = try? NSRegularExpression(pattern: funcHeadPattern) else { return (code, 0) }
+
     var enums: [EnumInfo] = []
-    for i in 0..<root.childCount {
-      guard let child = root.child(at: i), child.nodeType == "class_declaration" else { continue }
-      let startRow = Int(child.pointRange.lowerBound.row)
-      let endRow = Int(child.pointRange.upperBound.row)
-      guard startRow < lines.count, endRow < lines.count else { continue }
-      let firstLine = lines[startRow].trimmingCharacters(in: .whitespaces)
-      guard firstLine.hasPrefix("enum ") else { continue }
-      let tokens = firstLine.components(separatedBy: CharacterSet(charactersIn: " :<{"))
-        .filter { !$0.isEmpty }
-      guard tokens.count >= 2 else { continue }
-      let name = tokens[1]
-      var caseNames: Set<String> = []
-      collectEnumCases(child, utf16: utf16, into: &caseNames)
-      enums.append(EnumInfo(name: name, cases: caseNames, startRow: startRow, endRow: endRow))
+    struct FuncRange {
+      let name: String
+      let startRow: Int
+      let endRow: Int
+      let text: String
     }
-    guard !enums.isEmpty else { return (code, 0) }
+    var topFuncs: [FuncRange] = []
+
+    var i = 0
+    while i < lines.count {
+      let line = lines[i]
+      let nsRange = NSRange(line.startIndex..., in: line)
+      if let m = enumRegex.firstMatch(in: line, range: nsRange),
+         m.numberOfRanges >= 2, let nameRange = Range(m.range(at: 1), in: line),
+         line.contains("{") {
+        let name = String(line[nameRange])
+        if let endRow = findMatchingBrace(lines: lines, openRow: i) {
+          // Single-line enums close on the same row — nothing strictly between i+1 and endRow.
+          let body = endRow > i ? lines[(i+1)..<endRow].joined(separator: "\n") : lines[i]
+          let cases = collectEnumCaseNames(body)
+          enums.append(EnumInfo(name: name, cases: cases, startRow: i, endRow: endRow))
+          i = endRow + 1
+          continue
+        }
+      }
+      if let m = funcRegex.firstMatch(in: line, range: nsRange),
+         m.numberOfRanges >= 2, let nameRange = Range(m.range(at: 1), in: line),
+         line.contains("{") {
+        let name = String(line[nameRange])
+        if let endRow = findMatchingBrace(lines: lines, openRow: i) {
+          let text = lines[i...endRow].joined(separator: "\n")
+          topFuncs.append(FuncRange(name: name, startRow: i, endRow: endRow, text: text))
+          i = endRow + 1
+          continue
+        }
+      }
+      i += 1
+    }
+
+    guard !enums.isEmpty, !topFuncs.isEmpty else { return (code, 0) }
 
     struct FuncMove {
       let fnStartRow: Int
@@ -370,27 +403,19 @@ public struct TreeSitterRepair: Sendable {
     }
     var moves: [FuncMove] = []
 
-    for i in 0..<root.childCount {
-      guard let child = root.child(at: i), child.nodeType == "function_declaration" else { continue }
-      // Zero-parameter check: no `parameter` descendants in the function signature.
-      if hasAnyDescendant(child, ofType: "parameter") { continue }
-      let fnStartRow = Int(child.pointRange.lowerBound.row)
-      let fnEndRow = Int(child.pointRange.upperBound.row)
-      guard fnStartRow < lines.count, fnEndRow < lines.count else { continue }
-      let fnText = lines[fnStartRow...fnEndRow].joined(separator: "\n")
-
+    for fn in topFuncs {
       var targetIdx: Int?
-      for (eIdx, e) in enums.enumerated() where e.endRow < fnStartRow {
-        if referencesNonCase(fnText, enumName: e.name, cases: e.cases) {
+      for (eIdx, e) in enums.enumerated() where e.endRow < fn.startRow {
+        if referencesNonCase(fn.text, enumName: e.name, cases: e.cases) {
           targetIdx = eIdx
           break
         }
       }
       guard let enumIdx = targetIdx else { continue }
       let target = enums[enumIdx]
-      let rewritten = rewriteEnumRefs(fnText, enumName: target.name, cases: target.cases)
+      let rewritten = rewriteEnumRefs(fn.text, enumName: target.name, cases: target.cases)
       moves.append(FuncMove(
-        fnStartRow: fnStartRow, fnEndRow: fnEndRow,
+        fnStartRow: fn.startRow, fnEndRow: fn.endRow,
         enumIndex: enumIdx, rewrittenText: rewritten
       ))
     }
@@ -403,9 +428,9 @@ public struct TreeSitterRepair: Sendable {
       insertsAtEnumEnd[enums[m.enumIndex].endRow, default: []].append(m.rewrittenText)
     }
 
-    for (i, line) in lines.enumerated() {
-      if skipRows.contains(i) { continue }
-      if let inserts = insertsAtEnumEnd[i] {
+    for (idx, line) in lines.enumerated() {
+      if skipRows.contains(idx) { continue }
+      if let inserts = insertsAtEnumEnd[idx] {
         let outerIndent = String(line.prefix { $0 == " " || $0 == "\t" })
         let methodIndent = outerIndent + "  "
         for fnText in inserts {
@@ -418,6 +443,51 @@ public struct TreeSitterRepair: Sendable {
       output.append(line)
     }
     return (output.joined(separator: "\n"), moves.count)
+  }
+
+  /// Starting at a row that contains at least one `{`, return the row of the matching `}`
+  /// (same brace depth). Nil if unbalanced. Ignores braces inside `"…"` string literals.
+  private func findMatchingBrace(lines: [String], openRow: Int) -> Int? {
+    var depth = 0
+    var seenOpen = false
+    for r in openRow..<lines.count {
+      var inString = false
+      var prev: Character = "\0"
+      for ch in lines[r] {
+        if ch == "\"" && prev != "\\" { inString.toggle() }
+        if !inString {
+          if ch == "{" {
+            depth += 1; seenOpen = true
+          } else if ch == "}" {
+            depth -= 1
+            if seenOpen && depth == 0 { return r }
+          }
+        }
+        prev = ch
+      }
+    }
+    return nil
+  }
+
+  /// Extract enum case names from an enum body. Handles `case a, b, c`, `case x = "y"`,
+  /// inline single-line enums, and skips `case .red:` switch patterns (preceded by `.`).
+  private func collectEnumCaseNames(_ body: String) -> Set<String> {
+    var names: Set<String> = []
+    // Match `case <ident>[=value][, <ident>[=value]]…` where <ident> starts with a letter
+    // or underscore (so `.red` inside a switch is not matched as a case name).
+    let pattern = #"\bcase\s+([a-zA-Z_]\w*(?:\s*=\s*"[^"]*")?(?:\s*,\s*[a-zA-Z_]\w*(?:\s*=\s*"[^"]*")?)*)"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return names }
+    let nsRange = NSRange(body.startIndex..., in: body)
+    for m in regex.matches(in: body, range: nsRange) {
+      guard m.numberOfRanges >= 2, let r = Range(m.range(at: 1), in: body) else { continue }
+      let payload = String(body[r])
+      for entry in payload.components(separatedBy: ",") {
+        let token = entry.trimmingCharacters(in: .whitespaces)
+          .components(separatedBy: CharacterSet(charactersIn: " =")).first ?? ""
+        if !token.isEmpty { names.insert(token) }
+      }
+    }
+    return names
   }
 
   private func referencesNonCase(_ text: String, enumName: String, cases: Set<String>) -> Bool {
@@ -446,39 +516,6 @@ public struct TreeSitterRepair: Sendable {
       result.replaceSubrange(full, with: replacement)
     }
     return result
-  }
-
-  private func collectEnumCases(_ node: Node, utf16: [UInt16], into cases: inout Set<String>) {
-    if node.nodeType == "enum_entry" {
-      for j in 0..<node.childCount {
-        guard let sub = node.child(at: j) else { continue }
-        if sub.nodeType == "simple_identifier" {
-          cases.insert(nodeText(sub, utf16: utf16))
-        }
-      }
-    }
-    for i in 0..<node.childCount {
-      guard let child = node.child(at: i) else { continue }
-      collectEnumCases(child, utf16: utf16, into: &cases)
-    }
-  }
-
-  private func hasAnyDescendant(_ node: Node, ofType type: String) -> Bool {
-    for i in 0..<node.childCount {
-      guard let child = node.child(at: i) else { continue }
-      if child.nodeType == type { return true }
-      if hasAnyDescendant(child, ofType: type) { return true }
-    }
-    return false
-  }
-
-  private func nodeText(_ node: Node, utf16: [UInt16]) -> String {
-    let startByte = Int(node.byteRange.lowerBound)
-    let endByte = Int(node.byteRange.upperBound)
-    let start = startByte / 2
-    let end = endByte / 2
-    guard start >= 0, end <= utf16.count, start < end else { return "" }
-    return String(utf16CodeUnits: Array(utf16[start..<end]), count: end - start)
   }
 
   // MARK: - Helpers
